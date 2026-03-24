@@ -108,5 +108,12 @@ test("pricing states stay distinct across actual, pending, and non-USD billing",
     appSource,
     /s\.costUsd > 0\s*\?\s*estimatedCost\(formatUsd\(s\.costUsd, locale\)\)\s*:\s*pricingPending/,
   );
+  assert.match(
+    appSource,
+    /snapshot\.totalCostToday > 0\s*\?\s*sc\.todayCost\(formatUsd\(snapshot\.totalCostToday, locale\)\)\s*:\s*sc\.pricingPending/,
+  );
+  assert.doesNotMatch(appSource, /sourceId === "antigravity"[\s\S]*estimatedCost/);
+  assert.doesNotMatch(appSource, /sourceId === "antigravity"[\s\S]*formatUsd/);
+  assert.doesNotMatch(appSource, /Antigravity[\s\S]*\$0\.00/);
   assert.doesNotMatch(appSource, /source-cost.*\$0\.00/);
 });

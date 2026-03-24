@@ -12,8 +12,8 @@ use serde_json::Result as JsonResult;
 use connectors::{collect_all, collect_all_with_progress, SourceReport};
 pub use models::DashboardSnapshot;
 use models::{
-    CalculationMethod, DailyUsagePoint, SessionGroup, SessionSummary, SourceDetailSnapshot,
-    SourceStatus, SourceUsage,
+    CalculationMethod, DailyUsagePoint, PeriodicBreakdownSet, SessionGroup, SessionSummary,
+    SourceDetailSnapshot, SourceStatus, SourceUsage, UsageWindowSummary,
 };
 pub use settings::AppSettings;
 
@@ -181,6 +181,11 @@ fn build_source_snapshot_from_reports(
             .into_iter()
             .map(|record| attach_session_cost(&record.summary, &session_costs))
             .collect(),
+        today_summary: UsageWindowSummary::default(),
+        last7d_summary: UsageWindowSummary::default(),
+        last30d_summary: UsageWindowSummary::default(),
+        lifetime_summary: UsageWindowSummary::default(),
+        periodic_breakdowns: PeriodicBreakdownSet::default(),
     })
 }
 
@@ -631,6 +636,205 @@ mod tests {
         approx_eq(snapshot.sessions[0].cost_usd, expected_cost);
     }
 
+    #[test]
+    fn source_detail_snapshot_includes_summary_windows_and_periodic_breakdowns() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let report = source_report_with_days(
+            "antigravity",
+            "Antigravity",
+            now,
+            &[
+                (0, 2_000, "antigravity-1"),
+                (7, 3_000, "antigravity-2"),
+                (35, 4_000, "antigravity-3"),
+            ],
+        );
+
+        let snapshot =
+            build_source_snapshot_from_reports(&[report], now, "antigravity").expect("source snapshot");
+
+        assert_eq!(snapshot.today_summary.tokens, 2_000);
+        assert_eq!(snapshot.last7d_summary.tokens, 5_000);
+        assert_eq!(snapshot.last30d_summary.tokens, 5_000);
+        assert_eq!(snapshot.lifetime_summary.tokens, 9_000);
+        assert!(!snapshot.periodic_breakdowns.weekly.is_empty());
+        assert!(!snapshot.periodic_breakdowns.monthly.is_empty());
+    }
+
+    #[test]
+    fn lifetime_summary_uses_full_event_history_not_bounded_daily_history() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let report = source_report_with_days(
+            "cursor",
+            "Cursor",
+            now,
+            &[
+                (0, 1_000, "cursor-1"),
+                (45, 2_000, "cursor-2"),
+                (210, 3_000, "cursor-3"),
+            ],
+        );
+
+        let snapshot =
+            build_source_snapshot_from_reports(&[report], now, "cursor").expect("source snapshot");
+
+        assert_eq!(snapshot.lifetime_summary.tokens, 6_000);
+        assert_eq!(snapshot.daily_history.len(), 30);
+    }
+
+    #[test]
+    fn source_detail_pricing_coverage_is_partial_when_only_some_sessions_are_priced() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let occurred_at = now.with_timezone(&Utc);
+        let report = SourceReport {
+            status: ready_status("codex", "Codex"),
+            usage_events: vec![
+                UsageEvent {
+                    source_id: "codex",
+                    occurred_at,
+                    model: "gpt-5.4".into(),
+                    token_breakdown: TokenBreakdown {
+                        input_tokens: 1_000,
+                        cached_input_tokens: 500,
+                        output_tokens: 250,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens: 1_750,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: "session-priced".into(),
+                },
+                UsageEvent {
+                    source_id: "codex",
+                    occurred_at,
+                    model: "unknown".into(),
+                    token_breakdown: TokenBreakdown {
+                        other_tokens: 2_000,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens: 2_000,
+                    calculation_method: CalculationMethod::Estimated,
+                    session_id: "session-pending".into(),
+                },
+            ],
+            sessions: vec![
+                SessionRecord {
+                    updated_at: occurred_at,
+                    summary: SessionSummary {
+                        id: "session-priced".into(),
+                        source_id: "codex".into(),
+                        title: "Session".into(),
+                        preview: "Preview".into(),
+                        source: "Codex".into(),
+                        workspace: "burned".into(),
+                        model: "gpt-5.4".into(),
+                        started_at: "Mar 24 12:00".into(),
+                        total_tokens: 1_750,
+                        cost_usd: 0.0,
+                        calculation_method: CalculationMethod::Native,
+                        status: "indexed".into(),
+                    },
+                },
+                SessionRecord {
+                    updated_at: occurred_at,
+                    summary: SessionSummary {
+                        id: "session-pending".into(),
+                        source_id: "codex".into(),
+                        title: "Session".into(),
+                        preview: "Preview".into(),
+                        source: "Codex".into(),
+                        workspace: "burned".into(),
+                        model: "unknown".into(),
+                        started_at: "Mar 24 12:00".into(),
+                        total_tokens: 2_000,
+                        cost_usd: 0.0,
+                        calculation_method: CalculationMethod::Estimated,
+                        status: "pending".into(),
+                    },
+                },
+            ],
+        };
+
+        let snapshot =
+            build_source_snapshot_from_reports(&[report], now, "codex").expect("source snapshot");
+
+        assert_eq!(snapshot.today_cost_usd, 0.006_375);
+        assert_eq!(
+            snapshot.today_summary.pricing_coverage,
+            models::PricingCoverage::Partial
+        );
+        assert!(snapshot.today_summary.pending_pricing_sessions > 0);
+    }
+
+    #[test]
+    fn source_detail_summary_windows_include_previous_period_deltas() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let report = source_report_with_days(
+            "claude",
+            "Claude Code",
+            now,
+            &[
+                (0, 1_000, "claude-1"),
+                (1, 2_000, "claude-2"),
+                (7, 3_000, "claude-3"),
+                (14, 4_000, "claude-4"),
+            ],
+        );
+
+        let snapshot =
+            build_source_snapshot_from_reports(&[report], now, "claude").expect("source snapshot");
+
+        assert!(snapshot.last7d_summary.delta_vs_previous_period.is_some());
+        assert!(snapshot.last30d_summary.delta_vs_previous_period.is_some());
+        assert!(
+            snapshot
+                .last7d_summary
+                .delta_vs_previous_period
+                .as_ref()
+                .map(|delta| delta.tokens_delta)
+                .unwrap_or_default()
+                > 0
+        );
+    }
+
+    #[test]
+    fn source_detail_periodic_breakdowns_are_limited_to_recent_expected_periods() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let report = source_report_with_days(
+            "cherry",
+            "Cherry Studio",
+            now,
+            &[
+                (0, 1_000, "cherry-1"),
+                (7, 2_000, "cherry-2"),
+                (35, 3_000, "cherry-3"),
+                (70, 4_000, "cherry-4"),
+                (150, 5_000, "cherry-5"),
+            ],
+        );
+
+        let snapshot =
+            build_source_snapshot_from_reports(&[report], now, "cherry").expect("source snapshot");
+
+        assert!(snapshot.periodic_breakdowns.weekly.len() <= 8);
+        assert!(snapshot.periodic_breakdowns.monthly.len() <= 6);
+        assert!(snapshot.periodic_breakdowns.weekly.iter().any(|row| row.tokens > 0));
+    }
+
     fn ready_status(id: &str, name: &str) -> SourceStatus {
         SourceStatus {
             id: id.into(),
@@ -641,6 +845,70 @@ mod tests {
             local_path: None,
             session_count: Some(1),
             last_seen_at: None,
+        }
+    }
+
+    fn source_report_with_days(
+        id: &'static str,
+        name: &str,
+        now: chrono::DateTime<Local>,
+        days: &[(i64, u64, &str)],
+    ) -> SourceReport {
+        let usage_events = days
+            .iter()
+            .copied()
+            .map(|(days_ago, total_tokens, session_id)| {
+                let occurred_at = now
+                    .checked_sub_signed(Duration::days(days_ago))
+                    .expect("shifted local datetime")
+                    .with_timezone(&Utc);
+                UsageEvent {
+                    source_id: id,
+                    occurred_at,
+                    model: "gpt-5.4".into(),
+                    token_breakdown: TokenBreakdown {
+                        input_tokens: total_tokens,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: session_id.into(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let sessions = days
+            .iter()
+            .copied()
+            .map(|(days_ago, total_tokens, session_id)| {
+                let occurred_at = now
+                    .checked_sub_signed(Duration::days(days_ago))
+                    .expect("shifted local datetime")
+                    .with_timezone(&Utc);
+                SessionRecord {
+                    updated_at: occurred_at,
+                    summary: SessionSummary {
+                        id: session_id.into(),
+                        source_id: id.into(),
+                        title: "Session".into(),
+                        preview: "Preview".into(),
+                        source: name.into(),
+                        workspace: "burned".into(),
+                        model: "gpt-5.4".into(),
+                        started_at: format!("{name} {days_ago}"),
+                        total_tokens,
+                        cost_usd: 0.0,
+                        calculation_method: CalculationMethod::Native,
+                        status: "indexed".into(),
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+
+        SourceReport {
+            status: ready_status(id, name),
+            usage_events,
+            sessions,
         }
     }
 

@@ -66,3 +66,30 @@ test("source rows drill into a dedicated source detail page", () => {
   assert.match(appSource, /function SourceDetailPage\(/);
   assert.match(appSource, /window\.history\.pushState/);
 });
+
+test("connector detail page exposes summary cards and periodic breakdowns", () => {
+  assert.match(appSource, /source-summary-card/);
+  assert.match(appSource, /periodic-breakdown/);
+  assert.match(appSource, /session-sort/);
+  assert.match(appSource, /\bToday\b/);
+  assert.match(appSource, /\b7D\b/);
+  assert.match(appSource, /\b30D\b/);
+  assert.match(appSource, /\bLifetime\b/);
+});
+
+test("connector cards route into the source detail page", () => {
+  assert.match(appSource, /className="conn-card"/);
+  assert.match(appSource, /onOpenSource/);
+});
+
+test("source rows keep routing into the source detail page", () => {
+  assert.match(appSource, /SourceList/);
+  assert.match(appSource, /window\.history\.pushState/);
+});
+
+test("pricing states stay distinct across actual, pending, and non-USD billing", () => {
+  assert.match(appSource, /pricing pending/);
+  assert.match(appSource, /estimatedCost/);
+  assert.doesNotMatch(appSource, /Antigravity.*\$0\.00/);
+  assert.doesNotMatch(appSource, /antigravity.*estimatedCost/i);
+});

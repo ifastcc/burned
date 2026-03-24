@@ -17,6 +17,15 @@ pub enum SourceState {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PricingCoverage {
+    Actual,
+    Partial,
+    #[default]
+    Pending,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyUsagePoint {
@@ -26,6 +35,51 @@ pub struct DailyUsagePoint {
     pub exact_share: f64,
     pub active_sources: u16,
     pub session_count: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowDelta {
+    pub tokens_delta: i64,
+    pub tokens_percent_change: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindowSummary {
+    pub tokens: u64,
+    pub cost_usd: f64,
+    pub sessions: u32,
+    pub priced_sessions: u32,
+    pub pending_pricing_sessions: u32,
+    pub active_days: u16,
+    pub avg_per_active_day: f64,
+    pub exact_share: f64,
+    pub peak_day: Option<DailyUsagePoint>,
+    pub pricing_coverage: PricingCoverage,
+    pub delta_vs_previous_period: Option<WindowDelta>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeriodicBreakdownRow {
+    pub label: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub tokens: u64,
+    pub cost_usd: f64,
+    pub sessions: u32,
+    pub priced_sessions: u32,
+    pub pending_pricing_sessions: u32,
+    pub pricing_coverage: PricingCoverage,
+    pub active_days: u16,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeriodicBreakdownSet {
+    pub weekly: Vec<PeriodicBreakdownRow>,
+    pub monthly: Vec<PeriodicBreakdownRow>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -109,4 +163,9 @@ pub struct SourceDetailSnapshot {
     pub week: Vec<DailyUsagePoint>,
     pub daily_history: Vec<DailyUsagePoint>,
     pub sessions: Vec<SessionSummary>,
+    pub today_summary: UsageWindowSummary,
+    pub last7d_summary: UsageWindowSummary,
+    pub last30d_summary: UsageWindowSummary,
+    pub lifetime_summary: UsageWindowSummary,
+    pub periodic_breakdowns: PeriodicBreakdownSet,
 }

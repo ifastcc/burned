@@ -10,6 +10,45 @@ export type DailyUsagePoint = {
   sessionCount: number;
 };
 
+export type PricingCoverage = "actual" | "partial" | "pending";
+
+export type WindowDelta = {
+  tokensDelta: number;
+  tokensPercentChange: number | null;
+};
+
+export type UsageWindowSummary = {
+  tokens: number;
+  costUsd: number;
+  sessions: number;
+  pricedSessions: number;
+  pendingPricingSessions: number;
+  activeDays: number;
+  avgPerActiveDay: number;
+  exactShare: number;
+  peakDay: DailyUsagePoint | null;
+  pricingCoverage: PricingCoverage;
+  deltaVsPreviousPeriod: WindowDelta | null;
+};
+
+export type PeriodicBreakdownRow = {
+  label: string;
+  startDate: string;
+  endDate: string;
+  tokens: number;
+  costUsd: number;
+  sessions: number;
+  pricedSessions: number;
+  pendingPricingSessions: number;
+  pricingCoverage: PricingCoverage;
+  activeDays: number;
+};
+
+export type PeriodicBreakdownSet = {
+  weekly: PeriodicBreakdownRow[];
+  monthly: PeriodicBreakdownRow[];
+};
+
 export type SourceUsage = {
   sourceId: string;
   source: string;
@@ -79,6 +118,11 @@ export type SourceDetailSnapshot = {
   week: DailyUsagePoint[];
   dailyHistory: DailyUsagePoint[];
   sessions: SessionSummary[];
+  todaySummary: UsageWindowSummary;
+  last7dSummary: UsageWindowSummary;
+  last30dSummary: UsageWindowSummary;
+  lifetimeSummary: UsageWindowSummary;
+  periodicBreakdowns: PeriodicBreakdownSet;
 };
 
 export type CherryStudioSettings = {

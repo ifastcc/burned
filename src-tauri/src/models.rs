@@ -49,6 +49,14 @@ pub struct WindowDelta {
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PeakUsagePoint {
+    pub date: String,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UsageWindowSummary {
     pub tokens: u64,
     pub cost_usd: f64,
@@ -58,7 +66,7 @@ pub struct UsageWindowSummary {
     pub active_days: u16,
     pub avg_per_active_day: f64,
     pub exact_share: f64,
-    pub peak_day: Option<DailyUsagePoint>,
+    pub peak_day: Option<PeakUsagePoint>,
     pub pricing_coverage: PricingCoverage,
     pub delta_vs_previous_period: Option<WindowDelta>,
 }
@@ -178,9 +186,29 @@ pub struct SourceDetailSnapshot {
     pub billing_state: Option<BillingState>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BillingStateKind {
+    Credits,
+    Quota,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BillingStateStatus {
+    Ready,
+    Partial,
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingState {
-    pub source_id: String,
+    pub kind: BillingStateKind,
+    pub state: BillingStateStatus,
+    pub current: Option<f64>,
+    pub limit: Option<f64>,
+    pub unit: Option<String>,
+    pub updated_at: Option<String>,
     pub note: Option<String>,
 }

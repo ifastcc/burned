@@ -13,6 +13,12 @@ export type DailyUsagePoint = {
   pricingCoverage: PricingCoverage;
 };
 
+export type PeakUsagePoint = {
+  date: string;
+  totalTokens: number;
+  totalCostUsd: number;
+};
+
 export type PricingCoverage = "actual" | "partial" | "pending";
 
 export type WindowDelta = {
@@ -29,7 +35,7 @@ export type UsageWindowSummary = {
   activeDays: number;
   avgPerActiveDay: number;
   exactShare: number;
-  peakDay: DailyUsagePoint | null;
+  peakDay: PeakUsagePoint | null;
   pricingCoverage: PricingCoverage;
   deltaVsPreviousPeriod: WindowDelta | null;
 };
@@ -53,8 +59,13 @@ export type PeriodicBreakdownSet = {
 };
 
 export type BillingState = {
-  sourceId: string;
-  note?: string | null;
+  kind: "credits" | "quota";
+  state: "ready" | "partial" | "unavailable";
+  current: number | null;
+  limit: number | null;
+  unit: string | null;
+  updatedAt: string | null;
+  note: string | null;
 };
 
 export type SourceUsage = {

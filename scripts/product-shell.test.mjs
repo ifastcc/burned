@@ -83,7 +83,10 @@ test("connector cards route into the source detail page", () => {
     appSource,
     /function ConnectorGrid\([\s\S]*onOpenSource: \(sourceId: string\) => void;[\s\S]*className="conn-card"/,
   );
-  assert.doesNotMatch(appSource, /function ConnectorGrid\([\s\S]*onClick=\{\(\) => onOpenSource\(st\.id\)\}/);
+  assert.match(
+    appSource,
+    /function ConnectorGrid\([\s\S]*onClick=\{\(\) => onOpenSource\(st\.id\)\}/,
+  );
 });
 
 test("source rows keep routing into the source detail page", () => {

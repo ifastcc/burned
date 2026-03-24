@@ -35,6 +35,9 @@ pub struct DailyUsagePoint {
     pub exact_share: f64,
     pub active_sources: u16,
     pub session_count: u32,
+    pub priced_sessions: u32,
+    pub pending_pricing_sessions: u32,
+    pub pricing_coverage: PricingCoverage,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -107,6 +110,10 @@ pub struct SessionSummary {
     pub started_at: String,
     pub total_tokens: u64,
     pub cost_usd: f64,
+    pub priced_sessions: u32,
+    pub pending_pricing_sessions: u32,
+    pub pricing_coverage: PricingCoverage,
+    pub pricing_state: String,
     pub calculation_method: CalculationMethod,
     pub status: String,
 }
@@ -168,4 +175,12 @@ pub struct SourceDetailSnapshot {
     pub last30d_summary: UsageWindowSummary,
     pub lifetime_summary: UsageWindowSummary,
     pub periodic_breakdowns: PeriodicBreakdownSet,
+    pub billing_state: Option<BillingState>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingState {
+    pub source_id: String,
+    pub note: Option<String>,
 }

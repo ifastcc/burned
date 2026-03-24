@@ -12,8 +12,8 @@ use serde_json::Result as JsonResult;
 use connectors::{collect_all, collect_all_with_progress, SourceReport};
 pub use models::DashboardSnapshot;
 use models::{
-    CalculationMethod, DailyUsagePoint, PeriodicBreakdownSet, SessionGroup, SessionSummary,
-    SourceDetailSnapshot, SourceStatus, SourceUsage, UsageWindowSummary,
+    CalculationMethod, DailyUsagePoint, PeriodicBreakdownSet, PricingCoverage, SessionGroup,
+    SessionSummary, SourceDetailSnapshot, SourceStatus, SourceUsage, UsageWindowSummary,
 };
 pub use settings::AppSettings;
 
@@ -152,7 +152,9 @@ fn build_source_snapshot_from_reports(
     now: chrono::DateTime<Local>,
     source_id: &str,
 ) -> Option<SourceDetailSnapshot> {
-    let report = reports.iter().find(|report| report.status.id == source_id)?;
+    let report = reports
+        .iter()
+        .find(|report| report.status.id == source_id)?;
     let usage_events = report.usage_events.iter().collect::<Vec<_>>();
     let week = build_weekly_usage(&usage_events, now);
     let daily_history = build_daily_history(&usage_events, now, 30);
@@ -163,6 +165,9 @@ fn build_source_snapshot_from_reports(
         exact_share: 0.0,
         active_sources: 0,
         session_count: 0,
+        priced_sessions: 0,
+        pending_pricing_sessions: 0,
+        pricing_coverage: PricingCoverage::Pending,
     });
     let session_costs = build_session_costs(reports);
     let mut sessions = report.sessions.iter().collect::<Vec<_>>();
@@ -186,6 +191,7 @@ fn build_source_snapshot_from_reports(
         last30d_summary: UsageWindowSummary::default(),
         lifetime_summary: UsageWindowSummary::default(),
         periodic_breakdowns: PeriodicBreakdownSet::default(),
+        billing_state: None,
     })
 }
 
@@ -205,9 +211,7 @@ where
     serde_json::to_string(&build_dashboard_snapshot_with_progress(on_progress))
 }
 
-pub fn set_scan_detail_hook(
-    hook: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
-) {
+pub fn set_scan_detail_hook(hook: Option<Arc<dyn Fn(String, String) + Send + Sync>>) {
     connectors::set_scan_detail_hook(hook);
 }
 
@@ -278,6 +282,9 @@ fn build_usage_window(
                 exact_share,
                 active_sources: count_active_sources_for_day(usage_events, day),
                 session_count: count_sessions_for_day(usage_events, day),
+                priced_sessions: 0,
+                pending_pricing_sessions: 0,
+                pricing_coverage: PricingCoverage::Pending,
             }
         })
         .collect()
@@ -314,9 +321,14 @@ fn build_source_usage(
         .iter()
         .filter(|report| !matches!(report.status.state, models::SourceState::Missing))
         .map(|report| {
-            let (today_tokens, yesterday_tokens, today_cost_usd, today_sessions, _) = usage_by_source
-                .remove(&report.status.id)
-                .unwrap_or((0, 0, 0.0, HashSet::new(), HashSet::new()));
+            let (today_tokens, yesterday_tokens, today_cost_usd, today_sessions, _) =
+                usage_by_source.remove(&report.status.id).unwrap_or((
+                    0,
+                    0,
+                    0.0,
+                    HashSet::new(),
+                    HashSet::new(),
+                ));
             let trend = if today_tokens > yesterday_tokens + (yesterday_tokens / 20).max(1) {
                 "up"
             } else if yesterday_tokens > today_tokens + (today_tokens / 20).max(1) {
@@ -425,6 +437,15 @@ fn attach_session_cost(
     let mut summary = summary.clone();
     if let Some(cost_usd) = session_costs.get(&session_cost_key(&summary.source_id, &summary.id)) {
         summary.cost_usd = *cost_usd;
+        summary.priced_sessions = 1;
+        summary.pending_pricing_sessions = 0;
+        summary.pricing_coverage = PricingCoverage::Actual;
+        summary.pricing_state = "actual".into();
+    } else {
+        summary.priced_sessions = 0;
+        summary.pending_pricing_sessions = 1;
+        summary.pricing_coverage = PricingCoverage::Pending;
+        summary.pricing_state = "pending".into();
     }
     summary
 }
@@ -507,6 +528,7 @@ mod tests {
                 total_tokens: 1_750,
                 calculation_method: CalculationMethod::Native,
                 session_id: "session-1".into(),
+                explicit_cost_usd: None,
             }],
             sessions: vec![SessionRecord {
                 updated_at: occurred_at,
@@ -521,6 +543,10 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 1_750,
                     cost_usd: 0.0,
+                    priced_sessions: 0,
+                    pending_pricing_sessions: 0,
+                    pricing_coverage: models::PricingCoverage::Pending,
+                    pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },
@@ -533,7 +559,14 @@ mod tests {
         approx_eq(snapshot.sources[0].cost_usd, expected_cost);
         approx_eq(snapshot.sessions[0].cost_usd, expected_cost);
         approx_eq(snapshot.week[6].total_cost_usd, expected_cost);
-        approx_eq(snapshot.daily_history.last().expect("daily point").total_cost_usd, expected_cost);
+        approx_eq(
+            snapshot
+                .daily_history
+                .last()
+                .expect("daily point")
+                .total_cost_usd,
+            expected_cost,
+        );
     }
 
     #[test]
@@ -556,6 +589,7 @@ mod tests {
                 total_tokens: 8_000,
                 calculation_method: CalculationMethod::Estimated,
                 session_id: "cursor-1".into(),
+                explicit_cost_usd: None,
             }],
             sessions: vec![SessionRecord {
                 updated_at: occurred_at,
@@ -570,6 +604,10 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 8_000,
                     cost_usd: 0.0,
+                    priced_sessions: 0,
+                    pending_pricing_sessions: 0,
+                    pricing_coverage: models::PricingCoverage::Pending,
+                    pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Estimated,
                     status: "indexed".into(),
                 },
@@ -607,6 +645,7 @@ mod tests {
                 total_tokens: 1_750,
                 calculation_method: CalculationMethod::Native,
                 session_id: "session-1".into(),
+                explicit_cost_usd: None,
             }],
             sessions: vec![SessionRecord {
                 updated_at: occurred_at,
@@ -621,6 +660,10 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 1_750,
                     cost_usd: 0.0,
+                    priced_sessions: 0,
+                    pending_pricing_sessions: 0,
+                    pricing_coverage: models::PricingCoverage::Pending,
+                    pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },
@@ -653,8 +696,8 @@ mod tests {
             ],
         );
 
-        let snapshot =
-            build_source_snapshot_from_reports(&[report], now, "antigravity").expect("source snapshot");
+        let snapshot = build_source_snapshot_from_reports(&[report], now, "antigravity")
+            .expect("source snapshot");
 
         assert_eq!(snapshot.today_summary.tokens, 2_000);
         assert_eq!(snapshot.last7d_summary.tokens, 5_000);
@@ -711,6 +754,7 @@ mod tests {
                     total_tokens: 1_750,
                     calculation_method: CalculationMethod::Native,
                     session_id: "session-priced".into(),
+                    explicit_cost_usd: None,
                 },
                 UsageEvent {
                     source_id: "codex",
@@ -723,6 +767,7 @@ mod tests {
                     total_tokens: 2_000,
                     calculation_method: CalculationMethod::Estimated,
                     session_id: "session-pending".into(),
+                    explicit_cost_usd: None,
                 },
             ],
             sessions: vec![
@@ -739,6 +784,10 @@ mod tests {
                         started_at: "Mar 24 12:00".into(),
                         total_tokens: 1_750,
                         cost_usd: 0.0,
+                        priced_sessions: 0,
+                        pending_pricing_sessions: 0,
+                        pricing_coverage: models::PricingCoverage::Pending,
+                        pricing_state: "pending".into(),
                         calculation_method: CalculationMethod::Native,
                         status: "indexed".into(),
                     },
@@ -756,6 +805,10 @@ mod tests {
                         started_at: "Mar 24 12:00".into(),
                         total_tokens: 2_000,
                         cost_usd: 0.0,
+                        priced_sessions: 0,
+                        pending_pricing_sessions: 0,
+                        pricing_coverage: models::PricingCoverage::Pending,
+                        pricing_state: "pending".into(),
                         calculation_method: CalculationMethod::Estimated,
                         status: "pending".into(),
                     },
@@ -784,10 +837,7 @@ mod tests {
             "claude",
             "Claude Code",
             now,
-            &[
-                (0, 200, "claude-1"),
-                (7, 100, "claude-2"),
-            ],
+            &[(0, 200, "claude-1"), (7, 100, "claude-2")],
         );
 
         let snapshot =
@@ -855,6 +905,7 @@ mod tests {
                     total_tokens,
                     calculation_method: CalculationMethod::Native,
                     session_id: session_id.into(),
+                    explicit_cost_usd: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -880,6 +931,10 @@ mod tests {
                         started_at: format!("{name} {days_ago}"),
                         total_tokens,
                         cost_usd: 0.0,
+                        priced_sessions: 0,
+                        pending_pricing_sessions: 0,
+                        pricing_coverage: models::PricingCoverage::Pending,
+                        pricing_state: "pending".into(),
                         calculation_method: CalculationMethod::Native,
                         status: "indexed".into(),
                     },
@@ -921,6 +976,7 @@ mod tests {
                 total_tokens: 1_000 + week as u64,
                 calculation_method: CalculationMethod::Native,
                 session_id: session_id.clone(),
+                explicit_cost_usd: None,
             });
             sessions.push(SessionRecord {
                 updated_at: occurred_at,
@@ -935,6 +991,10 @@ mod tests {
                     started_at: format!("{name} {days_ago}"),
                     total_tokens: 1_000 + week as u64,
                     cost_usd: 0.0,
+                    priced_sessions: 0,
+                    pending_pricing_sessions: 0,
+                    pricing_coverage: models::PricingCoverage::Pending,
+                    pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },

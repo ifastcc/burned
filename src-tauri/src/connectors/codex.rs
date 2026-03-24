@@ -11,7 +11,9 @@ use walkdir::WalkDir;
 use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
-use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::models::{
+    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+};
 use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "codex";
@@ -215,6 +217,10 @@ fn query_recent_sessions(connection: &Connection) -> Result<Vec<SessionRecord>> 
                 started_at: started_local.format("%b %-d %H:%M").to_string(),
                 total_tokens: total_tokens.max(0) as u64,
                 cost_usd: 0.0,
+                priced_sessions: 0,
+                pending_pricing_sessions: 0,
+                pricing_coverage: PricingCoverage::Pending,
+                pricing_state: "pending".into(),
                 calculation_method: CalculationMethod::Native,
                 status: "indexed".into(),
             },
@@ -276,9 +282,7 @@ fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<Vec<Usa
     let total_files = session_files.len();
 
     for (index, path) in session_files.iter().enumerate() {
-        if total_files > 0
-            && (index == 0 || index + 1 == total_files || (index + 1) % 50 == 0)
-        {
+        if total_files > 0 && (index == 0 || index + 1 == total_files || (index + 1) % 50 == 0) {
             report_scan_detail(
                 SOURCE_NAME,
                 format!("Session files {}/{}", index + 1, total_files),
@@ -334,6 +338,7 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
         total_tokens,
         calculation_method: CalculationMethod::Native,
         session_id,
+        explicit_cost_usd: None,
     })
 }
 
@@ -361,7 +366,10 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
             continue;
         };
 
-        let entry_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
+        let entry_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if entry_type == "session_meta" {
             if let Some(meta_id) = value
                 .get("payload")
@@ -444,6 +452,7 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
             total_tokens,
             calculation_method: CalculationMethod::Native,
             session_id: session_id.clone(),
+            explicit_cost_usd: None,
         });
     }
 
@@ -456,7 +465,11 @@ fn normalize_raw_usage(value: &Value) -> Option<RawUsage> {
     let cached_input_tokens = record
         .get("cached_input_tokens")
         .and_then(number_from_value)
-        .or_else(|| record.get("cache_read_input_tokens").and_then(number_from_value))
+        .or_else(|| {
+            record
+                .get("cache_read_input_tokens")
+                .and_then(number_from_value)
+        })
         .unwrap_or(0);
     let output_tokens = record
         .get("output_tokens")
@@ -503,8 +516,13 @@ fn subtract_raw_usage(current: RawUsage, previous: Option<&RawUsage>) -> RawUsag
 
 fn number_from_value(value: &Value) -> Option<u64> {
     value.as_u64().or_else(|| {
-        value.as_i64()
-            .and_then(|number| if number >= 0 { Some(number as u64) } else { None })
+        value.as_i64().and_then(|number| {
+            if number >= 0 {
+                Some(number as u64)
+            } else {
+                None
+            }
+        })
     })
 }
 

@@ -5,7 +5,9 @@ use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 
 use crate::connectors::{SessionRecord, SourceConnector, SourceReport};
-use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::models::{
+    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+};
 
 const SOURCE_ID: &str = "antigravity";
 const SOURCE_NAME: &str = "Antigravity";
@@ -192,6 +194,10 @@ fn antigravity_sessions() -> Vec<SessionRecord> {
                     .to_string(),
                 total_tokens: 0,
                 cost_usd: 0.0,
+                priced_sessions: 0,
+                pending_pricing_sessions: 0,
+                pricing_coverage: PricingCoverage::Pending,
+                pricing_state: "pending".into(),
                 calculation_method: CalculationMethod::Estimated,
                 status: "indexed".into(),
             },

@@ -7,7 +7,9 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::connectors::{SessionRecord, SourceConnector, SourceReport};
-use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::models::{
+    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+};
 
 const SOURCE_ID: &str = "cursor";
 const SOURCE_NAME: &str = "Cursor";
@@ -213,6 +215,10 @@ fn query_sessions(
                     .to_string(),
                 total_tokens: 0,
                 cost_usd: 0.0,
+                priced_sessions: 0,
+                pending_pricing_sessions: 0,
+                pricing_coverage: PricingCoverage::Pending,
+                pricing_state: "pending".into(),
                 calculation_method: CalculationMethod::Estimated,
                 status: "indexed".into(),
             },

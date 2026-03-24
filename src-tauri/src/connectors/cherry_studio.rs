@@ -14,7 +14,9 @@ use zip::ZipArchive;
 use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
-use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::models::{
+    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+};
 use crate::pricing::TokenBreakdown;
 use crate::settings::{default_cherry_backup_dir, load_app_settings, CherryStudioSettings};
 
@@ -451,6 +453,10 @@ fn topic_to_session(topic: &HistoryTopic, model: Option<&String>) -> Option<Sess
                 .to_string(),
             total_tokens: 0,
             cost_usd: 0.0,
+            priced_sessions: 0,
+            pending_pricing_sessions: 0,
+            pricing_coverage: PricingCoverage::Pending,
+            pricing_state: "pending".into(),
             calculation_method: CalculationMethod::Estimated,
             status: "indexed".into(),
         },
@@ -605,6 +611,7 @@ fn collect_agent_sessions(db_path: &Path) -> Result<(Vec<SessionRecord>, Vec<Usa
                         total_tokens,
                         calculation_method: CalculationMethod::Native,
                         session_id: format!("agent:{session_id}"),
+                        explicit_cost_usd: None,
                     });
                 }
             }
@@ -657,6 +664,10 @@ fn agent_accumulator_to_session(accumulator: AgentSessionAccumulator) -> Option<
                 .to_string(),
             total_tokens,
             cost_usd: 0.0,
+            priced_sessions: 0,
+            pending_pricing_sessions: 0,
+            pricing_coverage: PricingCoverage::Pending,
+            pricing_state: "pending".into(),
             calculation_method,
             status: "indexed".into(),
         },
@@ -1107,6 +1118,7 @@ fn backup_topic_to_session(
                     total_tokens,
                     calculation_method: CalculationMethod::Native,
                     session_id: topic_id.clone(),
+                    explicit_cost_usd: None,
                 });
             }
         }
@@ -1147,6 +1159,10 @@ fn backup_topic_to_session(
                     .to_string(),
                 total_tokens,
                 cost_usd: 0.0,
+                priced_sessions: 0,
+                pending_pricing_sessions: 0,
+                pricing_coverage: PricingCoverage::Pending,
+                pricing_state: "pending".into(),
                 calculation_method,
                 status: "indexed".into(),
             },
@@ -1286,8 +1302,10 @@ fn usage_metrics_from_usage(value: &Value) -> Option<UsageMetrics> {
         .find_map(|key| value.get(*key).and_then(Value::as_u64))
         .unwrap_or(0);
     let input_tokens = usage_value(value, &["input_tokens", "inputTokens"]);
-    let cache_creation_input_tokens =
-        usage_value(value, &["cache_creation_input_tokens", "cacheCreationInputTokens"]);
+    let cache_creation_input_tokens = usage_value(
+        value,
+        &["cache_creation_input_tokens", "cacheCreationInputTokens"],
+    );
     let cached_input_tokens = usage_value(
         value,
         &[
@@ -1413,6 +1431,7 @@ mod tests {
                 total_tokens: 10,
                 calculation_method: CalculationMethod::Native,
                 session_id: "topic-a".into(),
+                explicit_cost_usd: None,
             },
             UsageEvent {
                 source_id: SOURCE_ID,
@@ -1425,6 +1444,7 @@ mod tests {
                 total_tokens: 20,
                 calculation_method: CalculationMethod::Native,
                 session_id: "topic-b".into(),
+                explicit_cost_usd: None,
             },
         ];
 
@@ -1472,6 +1492,10 @@ mod tests {
                     started_at: "Mar 20 08:00".into(),
                     total_tokens: 123,
                     cost_usd: 0.0,
+                    priced_sessions: 0,
+                    pending_pricing_sessions: 0,
+                    pricing_coverage: PricingCoverage::Pending,
+                    pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },
@@ -1487,6 +1511,7 @@ mod tests {
                 total_tokens: 123,
                 calculation_method: CalculationMethod::Native,
                 session_id: "backup-topic".into(),
+                explicit_cost_usd: None,
             }],
             topic_count: 1,
             ..Default::default()
@@ -1517,6 +1542,9 @@ mod tests {
         );
         assert_eq!(profile.api_key.as_deref(), Some("cs-sk-test"));
         assert_eq!(profile.enabled, Some(true));
-        assert_eq!(profile.updated_at.as_deref(), Some("2026-03-22T08:02:52.498Z"));
+        assert_eq!(
+            profile.updated_at.as_deref(),
+            Some("2026-03-22T08:02:52.498Z")
+        );
     }
 }

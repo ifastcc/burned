@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 
-use crate::models::{CalculationMethod, SessionSummary, SourceStatus};
+use crate::models::{CalculationMethod, PricingCoverage, SessionSummary, SourceStatus};
 use crate::pricing::{estimate_cost_usd, TokenBreakdown};
 
 type ScanDetailHook = Arc<dyn Fn(String, String) + Send + Sync>;
@@ -23,12 +23,42 @@ pub struct UsageEvent {
     pub total_tokens: u64,
     pub calculation_method: CalculationMethod,
     pub session_id: String,
+    pub explicit_cost_usd: Option<f64>,
 }
 
 impl UsageEvent {
     pub fn estimated_cost_usd(&self) -> Option<f64> {
-        estimate_cost_usd(&self.model, self.token_breakdown)
+        self.explicit_cost_usd.or_else(|| {
+            if source_supports_estimated_cost(self.source_id) {
+                estimate_cost_usd(&self.model, self.token_breakdown)
+            } else {
+                None
+            }
+        })
     }
+
+    #[allow(dead_code)]
+    pub fn pricing_coverage(&self) -> PricingCoverage {
+        if self.explicit_cost_usd.is_some() {
+            PricingCoverage::Actual
+        } else if source_supports_estimated_cost(self.source_id) {
+            PricingCoverage::Partial
+        } else {
+            PricingCoverage::Pending
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn pricing_state(&self) -> &'static str {
+        match self.pricing_coverage() {
+            PricingCoverage::Pending => "pending",
+            PricingCoverage::Actual | PricingCoverage::Partial => "actual",
+        }
+    }
+}
+
+pub fn source_supports_estimated_cost(source_id: &str) -> bool {
+    !matches!(source_id, "cursor" | "antigravity")
 }
 
 #[derive(Clone)]
@@ -78,7 +108,10 @@ fn default_connectors() -> Vec<(&'static str, Box<dyn SourceConnector>)> {
     vec![
         ("Codex", Box::new(codex::CodexConnector)),
         ("Claude Code", Box::new(claude_code::ClaudeCodeConnector)),
-        ("Cherry Studio", Box::new(cherry_studio::CherryStudioConnector)),
+        (
+            "Cherry Studio",
+            Box::new(cherry_studio::CherryStudioConnector),
+        ),
         ("Cursor", Box::new(cursor::CursorConnector)),
         ("Antigravity", Box::new(antigravity::AntigravityConnector)),
     ]

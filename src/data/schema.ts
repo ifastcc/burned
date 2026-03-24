@@ -8,6 +8,9 @@ export type DailyUsagePoint = {
   exactShare: number;
   activeSources: number;
   sessionCount: number;
+  pricedSessions: number;
+  pendingPricingSessions: number;
+  pricingCoverage: PricingCoverage;
 };
 
 export type PricingCoverage = "actual" | "partial" | "pending";
@@ -49,6 +52,11 @@ export type PeriodicBreakdownSet = {
   monthly: PeriodicBreakdownRow[];
 };
 
+export type BillingState = {
+  sourceId: string;
+  note?: string | null;
+};
+
 export type SourceUsage = {
   sourceId: string;
   source: string;
@@ -70,6 +78,10 @@ export type SessionSummary = {
   startedAt: string;
   totalTokens: number;
   costUsd: number;
+  pricedSessions: number;
+  pendingPricingSessions: number;
+  pricingCoverage: PricingCoverage;
+  pricingState: "actual" | "pending";
   calculationMethod: CalculationMethod;
   status: "indexed" | "recomputed" | "pending";
 };
@@ -123,6 +135,7 @@ export type SourceDetailSnapshot = {
   last30dSummary: UsageWindowSummary;
   lifetimeSummary: UsageWindowSummary;
   periodicBreakdowns: PeriodicBreakdownSet;
+  billingState: BillingState | null;
 };
 
 export type CherryStudioSettings = {

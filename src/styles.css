@@ -1384,6 +1384,13 @@ button {
   margin-bottom: 3px;
 }
 
+.sess-side {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-sm);
+  flex-shrink: 0;
+}
+
 .sess-title {
   font-size: 13px;
   font-weight: 500;
@@ -1402,6 +1409,26 @@ button {
   letter-spacing: 0.04em;
 }
 
+.sess-thread-toggle {
+  border: 1px solid rgba(255, 120, 50, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 120, 50, 0.06);
+  color: var(--ember);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 4px 9px;
+  cursor: pointer;
+  transition:
+    border-color 180ms ease,
+    background 180ms ease;
+}
+
+.sess-thread-toggle:hover {
+  border-color: rgba(255, 120, 50, 0.34);
+  background: rgba(255, 120, 50, 0.1);
+}
+
 .sess-meta {
   display: flex;
   gap: var(--sp-md);
@@ -1417,6 +1444,28 @@ button {
 
 .sess-cost.pending {
   color: var(--text-muted);
+}
+
+.sess-thread-note {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.sess-children {
+  display: grid;
+  gap: var(--sp-sm);
+  margin-top: var(--sp-md);
+  padding-top: var(--sp-md);
+  border-top: 1px solid rgba(255, 120, 50, 0.08);
+}
+
+.sess-item.nested {
+  margin-left: var(--sp-lg);
+  background: rgba(255, 255, 255, 0.015);
 }
 
 /* ============================================

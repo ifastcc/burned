@@ -14,7 +14,7 @@ use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
 use crate::models::{
-    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+    CalculationMethod, PricingCoverage, SessionRole, SessionSummary, SourceState, SourceStatus,
 };
 use crate::pricing::TokenBreakdown;
 
@@ -358,6 +358,9 @@ fn to_session_record(session: SessionAccumulator) -> Option<SessionRecord> {
             pricing_state: "pending".into(),
             calculation_method: CalculationMethod::Native,
             status: "indexed".into(),
+            parent_session_id: None,
+            session_role: SessionRole::Primary,
+            agent_label: None,
         },
     })
 }

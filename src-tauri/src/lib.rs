@@ -16,8 +16,8 @@ use connectors::{
 pub use models::DashboardSnapshot;
 use models::{
     CalculationMethod, DailyUsagePoint, PeakUsagePoint, PeriodicBreakdownRow, PeriodicBreakdownSet,
-    PricingCoverage, SessionGroup, SessionSummary, SourceDetailSnapshot, SourceStatus, SourceUsage,
-    UsageWindowSummary, WindowDelta,
+    PricingCoverage, SessionGroup, SessionSummary, SourceDetailSnapshot, SourceStatus,
+    SourceUsage, UsageWindowSummary, WindowDelta,
 };
 use pricing::estimate_cost_usd;
 pub use settings::AppSettings;
@@ -340,16 +340,77 @@ fn build_source_usage(
 
 fn build_recent_sessions(reports: &[SourceReport]) -> Vec<SessionSummary> {
     let session_costs = build_session_pricing_facts(reports);
-    let mut sessions = reports
+    let all_sessions = reports
         .iter()
         .flat_map(|report| report.sessions.iter())
         .collect::<Vec<_>>();
-    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    sessions
+    let sessions_by_id = all_sessions
+        .iter()
+        .map(|record| (record.summary.id.clone(), *record))
+        .collect::<HashMap<_, _>>();
+    let mut threads_by_root = HashMap::<String, Vec<&connectors::SessionRecord>>::new();
+
+    for record in &all_sessions {
+        let root_id = resolve_recent_session_root_id(record, &sessions_by_id);
+        threads_by_root.entry(root_id).or_default().push(*record);
+    }
+
+    let mut recent_threads = threads_by_root.into_iter().collect::<Vec<_>>();
+    recent_threads.sort_by(|left, right| {
+        right
+            .1
+            .iter()
+            .map(|record| record.updated_at)
+            .max()
+            .cmp(&left.1.iter().map(|record| record.updated_at).max())
+    });
+
+    recent_threads
         .into_iter()
         .take(8)
-        .map(|record| attach_session_cost(&record.summary, &session_costs))
+        .flat_map(|(root_id, mut records)| {
+            records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+
+            let root_summary = records
+                .iter()
+                .find(|record| record.summary.id == root_id)
+                .map(|record| attach_session_cost(&record.summary, &session_costs));
+
+            let child_summaries = records
+                .into_iter()
+                .filter(|record| record.summary.id != root_id)
+                .map(|record| attach_session_cost(&record.summary, &session_costs))
+                .collect::<Vec<_>>();
+
+            root_summary
+                .into_iter()
+                .chain(child_summaries)
+                .collect::<Vec<_>>()
+        })
         .collect()
+}
+
+fn resolve_recent_session_root_id(
+    session: &connectors::SessionRecord,
+    sessions_by_id: &HashMap<String, &connectors::SessionRecord>,
+) -> String {
+    let mut current = session;
+    let mut seen = HashSet::from([session.summary.id.as_str()]);
+
+    while current.summary.session_role == models::SessionRole::Subagent {
+        let Some(parent_id) = current.summary.parent_session_id.as_deref() else {
+            break;
+        };
+        let Some(parent_session) = sessions_by_id.get(parent_id).copied() else {
+            break;
+        };
+        if !seen.insert(parent_session.summary.id.as_str()) {
+            break;
+        }
+        current = parent_session;
+    }
+
+    current.summary.id.clone()
 }
 
 fn build_session_groups(reports: &[SourceReport]) -> Vec<SessionGroup> {
@@ -852,6 +913,9 @@ mod tests {
                     pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
+                    parent_session_id: None,
+                    session_role: models::SessionRole::Primary,
+                    agent_label: None,
                 },
             }],
         };
@@ -913,6 +977,9 @@ mod tests {
                     pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Estimated,
                     status: "indexed".into(),
+                    parent_session_id: None,
+                    session_role: models::SessionRole::Primary,
+                    agent_label: None,
                 },
             }],
         };
@@ -969,6 +1036,9 @@ mod tests {
                     pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
+                    parent_session_id: None,
+                    session_role: models::SessionRole::Primary,
+                    agent_label: None,
                 },
             }],
         };
@@ -1093,6 +1163,9 @@ mod tests {
                         pricing_state: "pending".into(),
                         calculation_method: CalculationMethod::Native,
                         status: "indexed".into(),
+                        parent_session_id: None,
+                        session_role: models::SessionRole::Primary,
+                        agent_label: None,
                     },
                 },
                 SessionRecord {
@@ -1114,6 +1187,9 @@ mod tests {
                         pricing_state: "pending".into(),
                         calculation_method: CalculationMethod::Estimated,
                         status: "pending".into(),
+                        parent_session_id: None,
+                        session_role: models::SessionRole::Primary,
+                        agent_label: None,
                     },
                 },
             ],
@@ -1149,6 +1225,9 @@ mod tests {
             pricing_state: "pending".into(),
             calculation_method: CalculationMethod::Native,
             status: "indexed".into(),
+            parent_session_id: None,
+            session_role: models::SessionRole::Primary,
+            agent_label: None,
         };
         let session_costs = HashMap::from([(
             session_cost_key("codex", "session-mixed"),
@@ -1187,6 +1266,9 @@ mod tests {
             pricing_state: "pending".into(),
             calculation_method: CalculationMethod::Native,
             status: "indexed".into(),
+            parent_session_id: None,
+            session_role: models::SessionRole::Primary,
+            agent_label: None,
         };
         let session_costs = HashMap::from([(
             session_cost_key("codex", "session-priced"),
@@ -1243,6 +1325,96 @@ mod tests {
         assert_eq!(snapshot.periodic_breakdowns.monthly.len(), 6);
     }
 
+    #[test]
+    fn dashboard_recent_sessions_keep_full_subagent_threads() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let base = now.with_timezone(&Utc);
+        let mut sessions = vec![
+            session_record(
+                "codex",
+                "Codex",
+                "parent",
+                "Primary thread",
+                base - Duration::minutes(8),
+                1_000,
+                None,
+                models::SessionRole::Primary,
+                None,
+            ),
+            session_record(
+                "codex",
+                "Codex",
+                "child-1",
+                "Primary thread",
+                base - Duration::minutes(1),
+                200,
+                Some("parent"),
+                models::SessionRole::Subagent,
+                Some("Euler"),
+            ),
+            session_record(
+                "codex",
+                "Codex",
+                "child-2",
+                "Primary thread",
+                base - Duration::minutes(2),
+                180,
+                Some("parent"),
+                models::SessionRole::Subagent,
+                Some("Noether"),
+            ),
+            session_record(
+                "codex",
+                "Codex",
+                "child-3",
+                "Primary thread",
+                base - Duration::minutes(9),
+                160,
+                Some("parent"),
+                models::SessionRole::Subagent,
+                Some("Ptolemy"),
+            ),
+        ];
+
+        for index in 0..7 {
+            sessions.push(session_record(
+                "codex",
+                "Codex",
+                &format!("solo-{index}"),
+                "Standalone",
+                base - Duration::minutes((index + 3) as i64),
+                50,
+                None,
+                models::SessionRole::Primary,
+                None,
+            ));
+        }
+
+        let snapshot = build_dashboard_snapshot_from_reports(
+            vec![SourceReport {
+                status: ready_status("codex", "Codex"),
+                usage_events: Vec::new(),
+                sessions,
+            }],
+            now,
+        );
+
+        let ids = snapshot
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(snapshot.sessions.len(), 11);
+        assert!(ids.contains("parent"));
+        assert!(ids.contains("child-1"));
+        assert!(ids.contains("child-2"));
+        assert!(ids.contains("child-3"));
+    }
+
     fn ready_status(id: &str, name: &str) -> SourceStatus {
         SourceStatus {
             id: id.into(),
@@ -1253,6 +1425,43 @@ mod tests {
             local_path: None,
             session_count: Some(1),
             last_seen_at: None,
+        }
+    }
+
+    fn session_record(
+        source_id: &str,
+        source_name: &str,
+        id: &str,
+        title: &str,
+        updated_at: chrono::DateTime<Utc>,
+        total_tokens: u64,
+        parent_session_id: Option<&str>,
+        session_role: models::SessionRole,
+        agent_label: Option<&str>,
+    ) -> SessionRecord {
+        SessionRecord {
+            updated_at,
+            summary: SessionSummary {
+                id: id.into(),
+                source_id: source_id.into(),
+                title: title.into(),
+                preview: "Preview".into(),
+                source: source_name.into(),
+                workspace: "burned".into(),
+                model: "gpt-5.4".into(),
+                started_at: title.into(),
+                total_tokens,
+                cost_usd: 0.0,
+                priced_sessions: 0,
+                pending_pricing_sessions: 0,
+                pricing_coverage: models::PricingCoverage::Pending,
+                pricing_state: "pending".into(),
+                calculation_method: CalculationMethod::Native,
+                status: "indexed".into(),
+                parent_session_id: parent_session_id.map(str::to_string),
+                session_role,
+                agent_label: agent_label.map(str::to_string),
+            },
         }
     }
 
@@ -1313,6 +1522,9 @@ mod tests {
                         pricing_state: "pending".into(),
                         calculation_method: CalculationMethod::Native,
                         status: "indexed".into(),
+                        parent_session_id: None,
+                        session_role: models::SessionRole::Primary,
+                        agent_label: None,
                     },
                 }
             })
@@ -1373,6 +1585,9 @@ mod tests {
                     pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
+                    parent_session_id: None,
+                    session_role: models::SessionRole::Primary,
+                    agent_label: None,
                 },
             });
         }

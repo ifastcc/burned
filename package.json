@@ -1,7 +1,7 @@
 {
   "name": "burned",
   "private": false,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local AI usage tracker with a browser dashboard and source-native token collectors.",
   "type": "module",
   "author": "kbaicai",
@@ -45,7 +45,7 @@
     "rust:check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "tauri:dev": "node ./scripts/tauri-dev.mjs",
     "tauri:build": "tauri build",
-    "test": "node --test scripts/dev-ports.test.mjs scripts/burned-cli.test.mjs scripts/date-utils.test.mjs scripts/product-shell.test.mjs",
+    "test": "node --test scripts/dev-ports.test.mjs scripts/burned-cli.test.mjs scripts/date-utils.test.mjs scripts/session-threads.test.mjs scripts/product-shell.test.mjs",
     "prepack": "pnpm build"
   },
   "dependencies": {

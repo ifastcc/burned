@@ -6,7 +6,7 @@ use chrono::{DateTime, Local, Utc};
 
 use crate::connectors::{SessionRecord, SourceConnector, SourceReport};
 use crate::models::{
-    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+    CalculationMethod, PricingCoverage, SessionRole, SessionSummary, SourceState, SourceStatus,
 };
 
 const SOURCE_ID: &str = "antigravity";
@@ -200,6 +200,9 @@ fn antigravity_sessions_from_brain_root(brain_root: &Path) -> Vec<SessionRecord>
                 pricing_state: "pending".into(),
                 calculation_method: CalculationMethod::Estimated,
                 status: "indexed".into(),
+                parent_session_id: None,
+                session_role: SessionRole::Primary,
+                agent_label: None,
             },
         });
     }

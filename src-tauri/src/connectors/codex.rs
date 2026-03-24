@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,7 @@ use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
 use crate::models::{
-    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+    CalculationMethod, PricingCoverage, SessionRole, SessionSummary, SourceState, SourceStatus,
 };
 use crate::pricing::TokenBreakdown;
 
@@ -46,6 +46,24 @@ impl RawUsage {
             other_tokens: self.total_tokens.saturating_sub(classified_tokens),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SessionThreadMetadata {
+    parent_session_id: Option<String>,
+    session_role: SessionRole,
+    agent_label: Option<String>,
+}
+
+struct SessionFilesScan {
+    usage_events: Vec<UsageEvent>,
+    thread_metadata_by_session: HashMap<String, SessionThreadMetadata>,
+}
+
+struct SessionFileScan {
+    session_id: String,
+    thread_metadata: SessionThreadMetadata,
+    usage_events: Vec<UsageEvent>,
 }
 
 impl SourceConnector for CodexConnector {
@@ -106,6 +124,7 @@ fn collect_codex() -> Result<SourceReport> {
 
     let mut sessions = Vec::new();
     let mut usage_events = Vec::new();
+    let mut session_thread_metadata = HashMap::new();
 
     if let Some(state_db) = latest_state_db.as_ref() {
         let connection = open_read_only(state_db)?;
@@ -114,13 +133,19 @@ fn collect_codex() -> Result<SourceReport> {
             .ok()
             .flatten()
             .map(format_timestamp);
-        sessions = query_recent_sessions(&connection)?;
     }
 
     if sessions_root.exists() {
-        usage_events = query_usage_events_from_session_files(&sessions_root)?;
+        let scan = query_usage_events_from_session_files(&sessions_root)?;
+        usage_events = scan.usage_events;
+        session_thread_metadata = scan.thread_metadata_by_session;
     } else if !log_dbs.is_empty() {
         usage_events = query_usage_events(&log_dbs)?;
+    }
+
+    if let Some(state_db) = latest_state_db.as_ref() {
+        let connection = open_read_only(state_db)?;
+        sessions = query_recent_sessions(&connection, &session_thread_metadata)?;
     }
 
     if !sessions.is_empty() || !usage_events.is_empty() {
@@ -163,7 +188,10 @@ fn missing_report() -> SourceReport {
     }
 }
 
-fn query_recent_sessions(connection: &Connection) -> Result<Vec<SessionRecord>> {
+fn query_recent_sessions(
+    connection: &Connection,
+    thread_metadata_by_session: &HashMap<String, SessionThreadMetadata>,
+) -> Result<Vec<SessionRecord>> {
     let mut statement = connection.prepare(
         "select id, created_at, updated_at, tokens_used, coalesce(model, ''), coalesce(cwd, ''), \
          coalesce(title, ''), coalesce(first_user_message, '') \
@@ -196,6 +224,7 @@ fn query_recent_sessions(connection: &Connection) -> Result<Vec<SessionRecord>> 
     for row in rows {
         let (id, created_at, updated_at, total_tokens, model, cwd, title, first_user_message) =
             row?;
+        let thread_metadata = thread_metadata_by_session.get(&id).cloned().unwrap_or_default();
         let started_at = epoch_to_utc(created_at).unwrap_or_else(Utc::now);
         let updated_at_dt = epoch_to_utc(updated_at).unwrap_or(started_at);
         let started_local = started_at.with_timezone(&Local);
@@ -221,6 +250,9 @@ fn query_recent_sessions(connection: &Connection) -> Result<Vec<SessionRecord>> 
                 pricing_state: "pending".into(),
                 calculation_method: CalculationMethod::Native,
                 status: "indexed".into(),
+                parent_session_id: thread_metadata.parent_session_id,
+                session_role: thread_metadata.session_role,
+                agent_label: thread_metadata.agent_label,
             },
         });
     }
@@ -267,9 +299,10 @@ fn query_usage_events(log_dbs: &[PathBuf]) -> Result<Vec<UsageEvent>> {
     Ok(events)
 }
 
-fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<Vec<UsageEvent>> {
+fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<SessionFilesScan> {
     let cutoff = Utc::now() - chrono::Duration::days(180);
     let mut events = Vec::new();
+    let mut thread_metadata_by_session = HashMap::new();
     let session_files = WalkDir::new(sessions_root)
         .into_iter()
         .filter_map(std::result::Result::ok)
@@ -292,16 +325,20 @@ fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<Vec<Usa
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("unknown");
-
+        let scan = parse_session_file(&contents, fallback_session_id);
+        thread_metadata_by_session.insert(scan.session_id.clone(), scan.thread_metadata);
         events.extend(
-            parse_session_usage_events(&contents, fallback_session_id)
+            scan.usage_events
                 .into_iter()
                 .filter(|event| event.occurred_at >= cutoff),
         );
     }
 
     events.sort_by(|left, right| left.occurred_at.cmp(&right.occurred_at));
-    Ok(events)
+    Ok(SessionFilesScan {
+        usage_events: events,
+        thread_metadata_by_session,
+    })
 }
 
 fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
@@ -340,10 +377,16 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
     })
 }
 
+#[cfg(test)]
 fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<UsageEvent> {
+    parse_session_file(contents, fallback_session_id).usage_events
+}
+
+fn parse_session_file(contents: &str, fallback_session_id: &str) -> SessionFileScan {
     let mut events = Vec::new();
     let mut session_id = fallback_session_id.to_string();
     let mut session_model = String::from("unknown");
+    let mut thread_metadata = SessionThreadMetadata::default();
     let mut previous_totals: Option<RawUsage> = None;
     let mut saw_session_meta = false;
 
@@ -378,6 +421,9 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
                     .filter(|value| !value.is_empty())
                 {
                     session_id = meta_id.to_string();
+                }
+                if let Some(metadata) = extract_session_thread_metadata(&value) {
+                    thread_metadata = metadata;
                 }
                 saw_session_meta = true;
             }
@@ -458,7 +504,53 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
         });
     }
 
-    events
+    SessionFileScan {
+        session_id,
+        thread_metadata,
+        usage_events: events,
+    }
+}
+
+fn extract_session_thread_metadata(value: &Value) -> Option<SessionThreadMetadata> {
+    let payload = value.get("payload")?;
+    let thread_spawn = payload
+        .get("source")
+        .and_then(|source| source.get("subagent"))
+        .and_then(|subagent| subagent.get("thread_spawn"));
+    let parent_session_id = payload
+        .get("forked_from_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            thread_spawn
+                .and_then(|spawn| spawn.get("parent_thread_id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+    let agent_label = payload
+        .get("agent_nickname")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            thread_spawn
+                .and_then(|spawn| spawn.get("agent_nickname"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+
+    Some(SessionThreadMetadata {
+        parent_session_id: parent_session_id.clone(),
+        session_role: if parent_session_id.is_some() {
+            SessionRole::Subagent
+        } else {
+            SessionRole::Primary
+        },
+        agent_label,
+    })
 }
 
 fn normalize_raw_usage(value: &Value) -> Option<RawUsage> {
@@ -730,5 +822,36 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "child-thread");
         assert_eq!(events[0].total_tokens, 150);
+    }
+
+    #[test]
+    fn extracts_subagent_relationship_from_session_meta() {
+        let value = serde_json::from_str::<Value>(
+            r#"{
+                "type":"session_meta",
+                "payload":{
+                    "id":"child-thread",
+                    "forked_from_id":"parent-thread",
+                    "agent_nickname":"Euler",
+                    "source":{
+                        "subagent":{
+                            "thread_spawn":{
+                                "parent_thread_id":"parent-thread",
+                                "depth":1,
+                                "agent_nickname":"Euler",
+                                "agent_role":"explorer"
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("session_meta json");
+
+        let metadata = extract_session_thread_metadata(&value).expect("thread metadata");
+
+        assert_eq!(metadata.parent_session_id.as_deref(), Some("parent-thread"));
+        assert_eq!(metadata.session_role, SessionRole::Subagent);
+        assert_eq!(metadata.agent_label.as_deref(), Some("Euler"));
     }
 }

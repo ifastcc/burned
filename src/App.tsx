@@ -3,6 +3,11 @@ import { startTransition, useEffect, useEffectEvent, useRef, useState } from "re
 import { createEmptyDashboardSnapshot } from "./data/empty-dashboard";
 import { toLocalIsoDate } from "./date-utils.mjs";
 import { appCopy } from "./app-copy.mjs";
+import {
+  buildSessionThreadGroups,
+  shouldShowSourceLabel,
+  sortSessionThreadGroups,
+} from "./session-threads.mjs";
 import type {
   BillingState,
   DailyUsagePoint,
@@ -28,6 +33,12 @@ import {
 import "./styles.css";
 
 type AppRoute = { kind: "home" } | { kind: "source"; sourceId: string };
+type SessionThreadGroup = {
+  id: string;
+  session: SessionSummary;
+  children: SessionSummary[];
+  displaySession: SessionSummary;
+};
 
 function formatUsd(value: number, locale: Locale) {
   return new Intl.NumberFormat(locale === "zh-CN" ? "en-US" : "en-US", {
@@ -140,34 +151,6 @@ function formatBillingUsage(billingState: BillingState, locale: Locale, fallback
   }
 
   return fallback;
-}
-
-function sortSessions(
-  sessions: SessionSummary[],
-  sort: "recent" | "tokens" | "cost",
-) {
-  if (sort === "recent") {
-    return sessions;
-  }
-
-  const sorted = [...sessions];
-  if (sort === "tokens") {
-    sorted.sort(
-      (left, right) =>
-        right.totalTokens - left.totalTokens ||
-        right.costUsd - left.costUsd ||
-        left.title.localeCompare(right.title),
-    );
-    return sorted;
-  }
-
-  sorted.sort(
-    (left, right) =>
-      right.costUsd - left.costUsd ||
-      right.totalTokens - left.totalTokens ||
-      left.title.localeCompare(right.title),
-  );
-  return sorted;
 }
 
 function readRoute(pathname: string): AppRoute {
@@ -769,39 +752,154 @@ function SessionFeed({
   locale,
   estimatedCost,
   pricingPending,
+  subagentsLabel,
+  hideSubagents,
+  subagentTag,
+  sort = "recent",
+  sourceScoped = false,
   limit = 6,
 }: {
   sessions: SessionSummary[];
   locale: Locale;
   estimatedCost: (cost: string) => string;
   pricingPending: string;
+  subagentsLabel: (count: number) => string;
+  hideSubagents: string;
+  subagentTag: (label?: string | null) => string;
+  sort?: "recent" | "tokens" | "cost";
+  sourceScoped?: boolean;
   limit?: number;
 }) {
+  const [expandedThreads, setExpandedThreads] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setExpandedThreads({});
+  }, [sessions, limit]);
+
+  const groupedSessions: SessionThreadGroup[] = sortSessionThreadGroups(
+    buildSessionThreadGroups(sessions) as SessionThreadGroup[],
+    sort,
+  ).slice(0, limit);
+
   return (
     <div className="sess-feed">
-      {sessions.slice(0, limit).map((s) => (
-        <div key={`${s.sourceId}:${s.id}`} className="sess-item">
-          <div className="sess-top">
-            <span className="sess-title">{s.title || "Untitled"}</span>
-            <span className="sess-source">{s.source}</span>
-          </div>
-          <div className="sess-meta">
-            <span>{s.model}</span>
-            <span>{formatCompactNumber(s.totalTokens, locale, 1)} tokens</span>
-            <span className={`sess-cost${s.costUsd > 0 ? "" : " pending"}`}>
-              {s.costUsd > 0
-                ? formatCoverageCost(
-                    s.costUsd,
-                    s.pricingCoverage,
-                    locale,
-                    estimatedCost,
-                    pricingPending,
-                  )
-                : pricingPending}
-            </span>
-          </div>
+      {groupedSessions.map((group) => {
+        const isExpanded = expandedThreads[group.id] ?? false;
+        return (
+          <SessionCard
+            key={`${group.session.sourceId}:${group.id}`}
+            session={group.displaySession}
+            childSessions={group.children}
+            locale={locale}
+            estimatedCost={estimatedCost}
+            pricingPending={pricingPending}
+            subagentsLabel={subagentsLabel}
+            hideSubagents={hideSubagents}
+            subagentTag={subagentTag}
+            showSourceLabel={shouldShowSourceLabel({ nested: false, sourceScoped })}
+            isExpanded={isExpanded}
+            onToggleChildren={
+              group.children.length > 0
+                ? () =>
+                    setExpandedThreads((current) => ({
+                      ...current,
+                      [group.id]: !current[group.id],
+                    }))
+                : undefined
+            }
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function SessionCard({
+  session,
+  childSessions,
+  locale,
+  estimatedCost,
+  pricingPending,
+  subagentsLabel,
+  hideSubagents,
+  subagentTag,
+  showSourceLabel = true,
+  isExpanded = false,
+  onToggleChildren,
+  nested = false,
+}: {
+  session: SessionSummary;
+  childSessions?: SessionSummary[];
+  locale: Locale;
+  estimatedCost: (cost: string) => string;
+  pricingPending: string;
+  subagentsLabel: (count: number) => string;
+  hideSubagents: string;
+  subagentTag: (label?: string | null) => string;
+  showSourceLabel?: boolean;
+  isExpanded?: boolean;
+  onToggleChildren?: (() => void) | undefined;
+  nested?: boolean;
+}) {
+  const children = childSessions ?? [];
+  const isSubagent = session.sessionRole === "subagent";
+  const displayTitle =
+    nested && isSubagent ? subagentTag(session.agentLabel) : session.title || "Untitled";
+
+  return (
+    <div className={`sess-item${nested ? " nested" : ""}`}>
+      <div className="sess-top">
+        <span className="sess-title">{displayTitle}</span>
+        <div className="sess-side">
+          {children.length > 0 && onToggleChildren ? (
+            <button
+              type="button"
+              className="sess-thread-toggle"
+              onClick={onToggleChildren}
+              aria-expanded={isExpanded}
+            >
+              {isExpanded ? hideSubagents : subagentsLabel(children.length)}
+            </button>
+          ) : null}
+          {showSourceLabel ? <span className="sess-source">{session.source}</span> : null}
         </div>
-      ))}
+      </div>
+      <div className="sess-meta">
+        <span>{session.model}</span>
+        <span>{formatCompactNumber(session.totalTokens, locale, 1)} tokens</span>
+        <span className={`sess-cost${session.costUsd > 0 ? "" : " pending"}`}>
+          {session.costUsd > 0
+            ? formatCoverageCost(
+                session.costUsd,
+                session.pricingCoverage,
+                locale,
+                estimatedCost,
+                pricingPending,
+              )
+            : pricingPending}
+        </span>
+      </div>
+      {isSubagent && !nested ? (
+        <p className="sess-thread-note">{subagentTag(session.agentLabel)}</p>
+      ) : null}
+      {isExpanded && children.length > 0 ? (
+        <div className="sess-children">
+          {children.map((child) => (
+            <SessionCard
+              key={`${child.sourceId}:${child.id}`}
+              session={child}
+              locale={locale}
+              estimatedCost={estimatedCost}
+              pricingPending={pricingPending}
+              subagentsLabel={subagentsLabel}
+              hideSubagents={hideSubagents}
+              subagentTag={subagentTag}
+              showSourceLabel={false}
+              nested
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1106,8 +1204,6 @@ function SourceDetailPage({
     (lastSeen
       ? `${copy.connectors.lastSeen} ${lastSeen}`
       : `${sc.pricingCoverage}: ${calculationLabel(locale, snapshot.calculationMix)}`);
-  const sortedSessions = sortSessions(snapshot.sessions, sessionSort);
-
   return (
     <section className="source-detail-page">
       <div className="source-detail-header">
@@ -1217,12 +1313,17 @@ function SourceDetailPage({
             </select>
           </label>
         </div>
-        {sortedSessions.length > 0 ? (
+        {snapshot.sessions.length > 0 ? (
           <SessionFeed
-            sessions={sortedSessions}
+            sessions={snapshot.sessions}
             locale={locale}
             estimatedCost={estimatedCost}
             pricingPending={pricingPending}
+            subagentsLabel={sc.subagentsLabel}
+            hideSubagents={sc.hideSubagents}
+            subagentTag={sc.subagentTag}
+            sort={sessionSort}
+            sourceScoped
             limit={12}
           />
         ) : (
@@ -1490,6 +1591,9 @@ export default function App() {
                 locale={locale}
                 estimatedCost={sc.estimatedCost}
                 pricingPending={sc.pricingPending}
+                subagentsLabel={sc.subagentsLabel}
+                hideSubagents={sc.hideSubagents}
+                subagentTag={sc.subagentTag}
               />
             </section>
           )}

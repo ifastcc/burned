@@ -15,7 +15,7 @@ use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
 use crate::models::{
-    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+    CalculationMethod, PricingCoverage, SessionRole, SessionSummary, SourceState, SourceStatus,
 };
 use crate::pricing::TokenBreakdown;
 use crate::settings::{default_cherry_backup_dir, load_app_settings, CherryStudioSettings};
@@ -459,6 +459,9 @@ fn topic_to_session(topic: &HistoryTopic, model: Option<&String>) -> Option<Sess
             pricing_state: "pending".into(),
             calculation_method: CalculationMethod::Estimated,
             status: "indexed".into(),
+            parent_session_id: None,
+            session_role: SessionRole::Primary,
+            agent_label: None,
         },
     })
 }
@@ -670,6 +673,9 @@ fn agent_accumulator_to_session(accumulator: AgentSessionAccumulator) -> Option<
             pricing_state: "pending".into(),
             calculation_method,
             status: "indexed".into(),
+            parent_session_id: None,
+            session_role: SessionRole::Primary,
+            agent_label: None,
         },
     })
 }
@@ -1165,6 +1171,9 @@ fn backup_topic_to_session(
                 pricing_state: "pending".into(),
                 calculation_method,
                 status: "indexed".into(),
+                parent_session_id: None,
+                session_role: SessionRole::Primary,
+                agent_label: None,
             },
         },
         usage_events,
@@ -1498,6 +1507,9 @@ mod tests {
                     pricing_state: "pending".into(),
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
+                    parent_session_id: None,
+                    session_role: SessionRole::Primary,
+                    agent_label: None,
                 },
             }],
             usage_events: vec![UsageEvent {

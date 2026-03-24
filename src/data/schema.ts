@@ -95,6 +95,9 @@ export type SessionSummary = {
   pricingState: "actual" | "pending";
   calculationMethod: CalculationMethod;
   status: "indexed" | "recomputed" | "pending";
+  parentSessionId?: string | null;
+  sessionRole: "primary" | "subagent";
+  agentLabel?: string | null;
 };
 
 export type SourceStatus = {

@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::connectors::{SessionRecord, SourceConnector, SourceReport, UsageEvent};
 use crate::models::{
-    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+    CalculationMethod, PricingCoverage, SessionRole, SessionSummary, SourceState, SourceStatus,
 };
 use crate::pricing::TokenBreakdown;
 
@@ -255,6 +255,9 @@ fn parse_cursor_session(
                 CalculationMethod::Estimated
             },
             status: "indexed".into(),
+            parent_session_id: None,
+            session_role: SessionRole::Primary,
+            agent_label: None,
         },
     };
     let usage_event = is_priced.then(|| {

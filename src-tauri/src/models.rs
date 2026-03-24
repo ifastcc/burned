@@ -26,6 +26,14 @@ pub enum PricingCoverage {
     Pending,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionRole {
+    #[default]
+    Primary,
+    Subagent,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyUsagePoint {
@@ -124,6 +132,9 @@ pub struct SessionSummary {
     pub pricing_state: String,
     pub calculation_method: CalculationMethod,
     pub status: String,
+    pub parent_session_id: Option<String>,
+    pub session_role: SessionRole,
+    pub agent_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -400,6 +400,11 @@ button {
   min-width: 0;
 }
 
+.weekly-trend-copy {
+  display: grid;
+  gap: 10px;
+}
+
 .trend-kicker {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -416,6 +421,47 @@ button {
   font-weight: 400;
   color: var(--text);
   max-width: 18ch;
+}
+
+.weekly-focus {
+  display: grid;
+  gap: 8px;
+}
+
+.weekly-focus-value {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: clamp(2.4rem, 6vw, 4rem);
+  font-weight: 700;
+  line-height: 0.95;
+  letter-spacing: -0.04em;
+  color: var(--text);
+}
+
+.weekly-focus-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+
+.weekly-focus-date {
+  color: var(--text-dim);
+}
+
+.weekly-focus-sep {
+  color: var(--text-muted);
+}
+
+.weekly-focus-cost {
+  color: var(--flame);
+}
+
+.weekly-focus-cost.pending {
+  color: var(--text-muted);
 }
 
 .trend-inspector {

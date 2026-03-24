@@ -35,6 +35,17 @@ test("trend cards expose interactive inspection affordances", () => {
   assert.match(appSource, /spark-point-button/);
 });
 
+test("weekly card leads with a day-focus summary instead of repeating the date", () => {
+  assert.match(appSource, /title=\{sc\.weekFocusTitle\}/);
+  assert.match(appSource, /className="weekly-focus-value"/);
+  assert.match(appSource, /className="weekly-focus-meta"/);
+  assert.match(appSource, /const latestDay = data\[data.length - 1\];/);
+  assert.doesNotMatch(
+    appSource,
+    /<h2 className="trend-title">\{formatDayStamp\(activeDay\.date, locale\)\}<\/h2>/,
+  );
+});
+
 test("the app never falls back to mock dashboard data", () => {
   const removedFileName = `${["mock", "dashboard"].join("-")}.ts`;
   const removedSymbol = ["mock", "Dashboard"].join("");

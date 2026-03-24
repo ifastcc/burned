@@ -178,6 +178,42 @@ function TrendInspector({
   );
 }
 
+function WeeklyDayFocus({
+  day,
+  locale,
+  estimatedCost,
+  pricingPending,
+}: {
+  day: DailyUsagePoint;
+  locale: Locale;
+  estimatedCost: (cost: string) => string;
+  pricingPending: string;
+}) {
+  const hasUsage = day.totalTokens > 0;
+  const hasCost = day.totalCostUsd > 0;
+
+  return (
+    <div className="weekly-focus">
+      <strong className="weekly-focus-value">
+        {hasUsage ? formatTokenFigure(day.totalTokens, locale) : "—"}
+      </strong>
+      <div className="weekly-focus-meta">
+        <span className="weekly-focus-date">{formatDayStamp(day.date, locale)}</span>
+        {hasUsage && (
+          <>
+            <span className="weekly-focus-sep" aria-hidden="true">
+              ·
+            </span>
+            <span className={`weekly-focus-cost${hasCost ? "" : " pending"}`}>
+              {hasCost ? estimatedCost(formatUsd(day.totalCostUsd, locale)) : pricingPending}
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SparklineGraphic({
   data,
   averageTokens,
@@ -350,6 +386,7 @@ function WeeklyBurnCard({
   data,
   locale,
   label,
+  title,
   totalLabel,
   avgDayLabel,
   estimatedCost,
@@ -358,6 +395,7 @@ function WeeklyBurnCard({
   data: DailyUsagePoint[];
   locale: Locale;
   label: string;
+  title: string;
   totalLabel: string;
   avgDayLabel: string;
   estimatedCost: (cost: string) => string;
@@ -369,25 +407,25 @@ function WeeklyBurnCard({
 
   const total7 = data.reduce((sum, day) => sum + day.totalTokens, 0);
   const avg7 = data.length === 0 ? 0 : Math.round(total7 / data.length);
-  const peakDay = pickPeakDay(data);
-  const [selectedDate, setSelectedDate] = useState(peakDay.date);
+  const latestDay = data[data.length - 1];
+  const [selectedDate, setSelectedDate] = useState(latestDay.date);
 
   useEffect(() => {
     setSelectedDate((current) =>
-      data.some((day) => day.date === current) ? current : peakDay.date,
+      data.some((day) => day.date === current) ? current : latestDay.date,
     );
-  }, [data, peakDay.date]);
+  }, [data, latestDay.date]);
 
-  const activeDay = data.find((day) => day.date === selectedDate) ?? peakDay;
+  const activeDay = data.find((day) => day.date === selectedDate) ?? latestDay;
 
   return (
     <section className="trend-section weekly-trend-section">
       <article className="weekly-burn-card">
         <div className="weekly-burn-head">
-          <div className="trend-copy">
+          <div className="trend-copy weekly-trend-copy">
             <p className="trend-kicker">{label}</p>
-            <h2 className="trend-title">{formatDayStamp(activeDay.date, locale)}</h2>
-            <TrendInspector
+            <h2 className="trend-title">{title}</h2>
+            <WeeklyDayFocus
               day={activeDay}
               locale={locale}
               estimatedCost={estimatedCost}
@@ -736,6 +774,7 @@ function SourceDetailPage({
         data={snapshot.week}
         locale={locale}
         label={sc.last7Days}
+        title={sc.weekFocusTitle}
         totalLabel={sc.weekTotal}
         avgDayLabel={sc.avgDay}
         estimatedCost={estimatedCost}
@@ -979,6 +1018,7 @@ export default function App() {
             data={week}
             locale={locale}
             label={sc.last7Days}
+            title={sc.weekFocusTitle}
             totalLabel={sc.weekTotal}
             avgDayLabel={sc.avgDay}
             estimatedCost={sc.estimatedCost}

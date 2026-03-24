@@ -785,27 +785,21 @@ mod tests {
             "Claude Code",
             now,
             &[
-                (0, 1_000, "claude-1"),
-                (1, 2_000, "claude-2"),
-                (7, 3_000, "claude-3"),
-                (14, 4_000, "claude-4"),
+                (0, 200, "claude-1"),
+                (7, 100, "claude-2"),
             ],
         );
 
         let snapshot =
             build_source_snapshot_from_reports(&[report], now, "claude").expect("source snapshot");
 
-        assert!(snapshot.last7d_summary.delta_vs_previous_period.is_some());
-        assert!(snapshot.last30d_summary.delta_vs_previous_period.is_some());
-        assert!(
-            snapshot
-                .last7d_summary
-                .delta_vs_previous_period
-                .as_ref()
-                .map(|delta| delta.tokens_delta)
-                .unwrap_or_default()
-                > 0
-        );
+        assert!(matches!(
+            snapshot.last7d_summary.delta_vs_previous_period,
+            Some(models::WindowDelta {
+                tokens_delta: 100,
+                tokens_percent_change: Some(percent),
+            }) if (percent - 1.0).abs() < 1e-9
+        ));
     }
 
     #[test]
@@ -814,25 +808,13 @@ mod tests {
             .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
             .single()
             .expect("local datetime");
-        let report = source_report_with_days(
-            "cherry",
-            "Cherry Studio",
-            now,
-            &[
-                (0, 1_000, "cherry-1"),
-                (7, 2_000, "cherry-2"),
-                (35, 3_000, "cherry-3"),
-                (70, 4_000, "cherry-4"),
-                (150, 5_000, "cherry-5"),
-            ],
-        );
+        let report = source_report_with_weekly_history("cherry", "Cherry Studio", now, 30);
 
         let snapshot =
             build_source_snapshot_from_reports(&[report], now, "cherry").expect("source snapshot");
 
-        assert!(snapshot.periodic_breakdowns.weekly.len() <= 8);
-        assert!(snapshot.periodic_breakdowns.monthly.len() <= 6);
-        assert!(snapshot.periodic_breakdowns.weekly.iter().any(|row| row.tokens > 0));
+        assert_eq!(snapshot.periodic_breakdowns.weekly.len(), 8);
+        assert_eq!(snapshot.periodic_breakdowns.monthly.len(), 6);
     }
 
     fn ready_status(id: &str, name: &str) -> SourceStatus {
@@ -904,6 +886,60 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
+
+        SourceReport {
+            status: ready_status(id, name),
+            usage_events,
+            sessions,
+        }
+    }
+
+    fn source_report_with_weekly_history(
+        id: &'static str,
+        name: &str,
+        now: chrono::DateTime<Local>,
+        week_count: usize,
+    ) -> SourceReport {
+        let mut usage_events = Vec::new();
+        let mut sessions = Vec::new();
+
+        for week in 0..week_count {
+            let days_ago = (week * 7) as i64;
+            let occurred_at = now
+                .checked_sub_signed(Duration::days(days_ago))
+                .expect("shifted local datetime")
+                .with_timezone(&Utc);
+            let session_id = format!("{id}-{week}");
+            usage_events.push(UsageEvent {
+                source_id: id,
+                occurred_at,
+                model: "gpt-5.4".into(),
+                token_breakdown: TokenBreakdown {
+                    input_tokens: 1_000 + week as u64,
+                    ..TokenBreakdown::default()
+                },
+                total_tokens: 1_000 + week as u64,
+                calculation_method: CalculationMethod::Native,
+                session_id: session_id.clone(),
+            });
+            sessions.push(SessionRecord {
+                updated_at: occurred_at,
+                summary: SessionSummary {
+                    id: session_id,
+                    source_id: id.into(),
+                    title: "Session".into(),
+                    preview: "Preview".into(),
+                    source: name.into(),
+                    workspace: "burned".into(),
+                    model: "gpt-5.4".into(),
+                    started_at: format!("{name} {days_ago}"),
+                    total_tokens: 1_000 + week as u64,
+                    cost_usd: 0.0,
+                    calculation_method: CalculationMethod::Native,
+                    status: "indexed".into(),
+                },
+            });
+        }
 
         SourceReport {
             status: ready_status(id, name),

@@ -79,17 +79,31 @@ test("connector detail page exposes summary cards and periodic breakdowns", () =
 
 test("connector cards route into the source detail page", () => {
   assert.match(appSource, /className="conn-card"/);
-  assert.match(appSource, /onOpenSource/);
+  assert.match(
+    appSource,
+    /function ConnectorGrid\([\s\S]*onOpenSource: \(sourceId: string\) => void;[\s\S]*className="conn-card"/,
+  );
+  assert.doesNotMatch(appSource, /function ConnectorGrid\([\s\S]*onClick=\{\(\) => onOpenSource\(st\.id\)\}/);
 });
 
 test("source rows keep routing into the source detail page", () => {
   assert.match(appSource, /SourceList/);
-  assert.match(appSource, /window\.history\.pushState/);
+  assert.match(
+    appSource,
+    /onClick=\{\(\) => onOpenSource\(s\.sourceId\)\}[\s\S]*pricingPending=\{sc\.pricingPending\}/,
+  );
+  assert.match(
+    appSource,
+    /s\.costUsd > 0\s*\?\s*estimatedCost\(formatUsd\(s\.costUsd, locale\)\)\s*:\s*pricingPending/,
+  );
 });
 
 test("pricing states stay distinct across actual, pending, and non-USD billing", () => {
-  assert.match(appSource, /pricing pending/);
-  assert.match(appSource, /estimatedCost/);
-  assert.doesNotMatch(appSource, /Antigravity.*\$0\.00/);
-  assert.doesNotMatch(appSource, /antigravity.*estimatedCost/i);
+  assert.match(appSource, /className=\{`source-cost\$\{s\.costUsd > 0 \? "" : " pending"\}`\}/);
+  assert.match(appSource, /pricingPending=\{sc\.pricingPending\}/);
+  assert.match(
+    appSource,
+    /s\.costUsd > 0\s*\?\s*estimatedCost\(formatUsd\(s\.costUsd, locale\)\)\s*:\s*pricingPending/,
+  );
+  assert.doesNotMatch(appSource, /source-cost.*\$0\.00/);
 });

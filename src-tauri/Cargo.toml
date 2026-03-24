@@ -1,6 +1,6 @@
 [package]
 name = "burned"
-version = "0.1.2"
+version = "0.2.0"
 description = "Burned desktop observability app"
 authors = ["kbaicai"]
 edition = "2021"

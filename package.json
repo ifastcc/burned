@@ -1,0 +1,64 @@
+{
+  "name": "burned",
+  "private": false,
+  "version": "0.1.0",
+  "description": "Local AI usage tracker with a browser dashboard and source-native token collectors.",
+  "type": "module",
+  "author": "kbaicai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ifastcc/burned.git"
+  },
+  "homepage": "https://github.com/ifastcc/burned#readme",
+  "bugs": {
+    "url": "https://github.com/ifastcc/burned/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "bin": {
+    "burned": "./bin/burned.mjs"
+  },
+  "files": [
+    "README.md",
+    "bin",
+    "dist",
+    "scripts",
+    "src",
+    "src-tauri/build.rs",
+    "src-tauri/capabilities",
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/gen",
+    "src-tauri/icons",
+    "src-tauri/src",
+    "src-tauri/tauri.conf.json",
+    "burned"
+  ],
+  "scripts": {
+    "dev": "node ./scripts/dev-server.mjs",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "burned": "node ./bin/burned.mjs",
+    "rust:check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "tauri:dev": "node ./scripts/tauri-dev.mjs",
+    "tauri:build": "tauri build",
+    "test": "node --test scripts/dev-ports.test.mjs scripts/burned-cli.test.mjs",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.4.1"
+  }
+}

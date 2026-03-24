@@ -1,0 +1,97 @@
+use serde::Serialize;
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CalculationMethod {
+    Native,
+    Derived,
+    Estimated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceState {
+    Ready,
+    Partial,
+    Missing,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyUsagePoint {
+    pub date: String,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub exact_share: f64,
+    pub active_sources: u16,
+    pub session_count: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceUsage {
+    pub source: String,
+    pub tokens: u64,
+    pub cost_usd: f64,
+    pub sessions: u32,
+    pub trend: String,
+    pub calculation_mix: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub id: String,
+    pub source_id: String,
+    pub title: String,
+    pub preview: String,
+    pub source: String,
+    pub workspace: String,
+    pub model: String,
+    pub started_at: String,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+    pub calculation_method: CalculationMethod,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceStatus {
+    pub id: String,
+    pub name: String,
+    pub state: SourceState,
+    pub capabilities: Vec<String>,
+    pub note: String,
+    pub local_path: Option<String>,
+    pub session_count: Option<u32>,
+    pub last_seen_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionGroup {
+    pub source_id: String,
+    pub source_name: String,
+    pub source_state: SourceState,
+    pub sessions: Vec<SessionSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardSnapshot {
+    pub headline_date: String,
+    pub total_tokens_today: u64,
+    pub total_cost_today: f64,
+    pub exact_share: f64,
+    pub connected_sources: u16,
+    pub active_sources: u16,
+    pub burn_rate_per_hour: u64,
+    pub week: Vec<DailyUsagePoint>,
+    pub daily_history: Vec<DailyUsagePoint>,
+    pub sources: Vec<SourceUsage>,
+    pub sessions: Vec<SessionSummary>,
+    pub session_groups: Vec<SessionGroup>,
+    pub source_statuses: Vec<SourceStatus>,
+}

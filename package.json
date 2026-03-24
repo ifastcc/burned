@@ -18,7 +18,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "bin": {
-    "burned": "./bin/burned.mjs"
+    "burned": "bin/burned.mjs"
   },
   "files": [
     "README.md",

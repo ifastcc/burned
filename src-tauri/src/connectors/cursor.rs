@@ -6,10 +6,11 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
-use crate::connectors::{SessionRecord, SourceConnector, SourceReport};
+use crate::connectors::{SessionRecord, SourceConnector, SourceReport, UsageEvent};
 use crate::models::{
     CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
 };
+use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "cursor";
 const SOURCE_NAME: &str = "Cursor";
@@ -73,7 +74,7 @@ fn collect_cursor() -> Result<SourceReport> {
         .ok()
         .map(|entries| entries.filter_map(std::result::Result::ok).count() as u32);
     let workspace_map = composer_workspace_map(&workspace_storage);
-    let sessions = query_sessions(&connection, &workspace_map)?;
+    let (sessions, usage_events) = query_sessions(&connection, &workspace_map)?;
 
     Ok(SourceReport {
         status: SourceStatus {
@@ -91,7 +92,7 @@ fn collect_cursor() -> Result<SourceReport> {
             session_count: session_count.or(workspace_count),
             last_seen_at: format_mtime(&global_store).ok(),
         },
-        usage_events: Vec::new(),
+        usage_events,
         sessions,
     })
 }
@@ -138,7 +139,7 @@ fn display_path(path: PathBuf) -> String {
 fn query_sessions(
     connection: &Connection,
     workspace_map: &std::collections::HashMap<String, String>,
-) -> Result<Vec<SessionRecord>> {
+) -> Result<(Vec<SessionRecord>, Vec<UsageEvent>)> {
     let mut statement = connection.prepare(
         "select key, value from cursorDiskKV where key like 'composerData:%' and value <> ''",
     )?;
@@ -149,6 +150,7 @@ fn query_sessions(
     })?;
 
     let mut sessions = Vec::new();
+    let mut usage_events = Vec::new();
     for row in rows {
         let (key, raw_json) = row?;
         let composer_id = key.trim_start_matches("composerData:").to_string();
@@ -156,78 +158,189 @@ fn query_sessions(
             Ok(value) => value,
             Err(_) => continue,
         };
-
-        let created_at = value
-            .get("createdAt")
-            .and_then(Value::as_i64)
-            .and_then(epoch_millis_to_utc)
-            .unwrap_or_else(Utc::now);
-        let updated_at = value
-            .get("lastUpdatedAt")
-            .and_then(Value::as_i64)
-            .and_then(epoch_millis_to_utc)
-            .unwrap_or(created_at);
-        let title = value
-            .get("name")
-            .and_then(Value::as_str)
-            .map(normalize_text)
-            .filter(|text| !text.is_empty())
-            .or_else(|| {
-                value
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(normalize_text)
-                    .filter(|text| !text.is_empty())
-            })
-            .unwrap_or_else(|| "Untitled Cursor session".into());
-        let preview = value
-            .get("latestConversationSummary")
-            .and_then(|summary| summary.get("summary"))
-            .and_then(|summary| summary.get("summary"))
-            .and_then(Value::as_str)
-            .map(normalize_text)
-            .filter(|text| !text.is_empty())
-            .or_else(|| {
-                value
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(normalize_text)
-                    .filter(|text| !text.is_empty())
-            })
-            .unwrap_or_else(|| "No preview available.".into());
-
-        sessions.push(SessionRecord {
-            updated_at,
-            summary: SessionSummary {
-                id: composer_id.clone(),
-                source_id: SOURCE_ID.into(),
-                title: truncate(&title, 72),
-                preview: truncate(&preview, 180),
-                source: SOURCE_NAME.into(),
-                workspace: workspace_map
-                    .get(&composer_id)
-                    .cloned()
-                    .unwrap_or_else(|| "unknown".into()),
-                model: "unknown".into(),
-                started_at: created_at
-                    .with_timezone(&Local)
-                    .format("%b %-d %H:%M")
-                    .to_string(),
-                total_tokens: 0,
-                cost_usd: 0.0,
-                priced_sessions: 0,
-                pending_pricing_sessions: 0,
-                pricing_coverage: PricingCoverage::Pending,
-                pricing_state: "pending".into(),
-                calculation_method: CalculationMethod::Estimated,
-                status: "indexed".into(),
-            },
-        });
+        let workspace = workspace_map.get(&composer_id).cloned();
+        if let Some((session, usage_event)) = parse_cursor_session(&composer_id, &value, workspace)
+        {
+            sessions.push(session);
+            if let Some(usage_event) = usage_event {
+                usage_events.push(usage_event);
+            }
+        }
     }
 
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions.truncate(12);
-    Ok(sessions)
+    Ok((sessions, usage_events))
+}
+
+fn parse_cursor_session(
+    composer_id: &str,
+    value: &Value,
+    workspace: Option<String>,
+) -> Option<(SessionRecord, Option<UsageEvent>)> {
+    let created_at = value
+        .get("createdAt")
+        .and_then(Value::as_i64)
+        .and_then(epoch_millis_to_utc)
+        .unwrap_or_else(Utc::now);
+    let updated_at = value
+        .get("lastUpdatedAt")
+        .and_then(Value::as_i64)
+        .and_then(epoch_millis_to_utc)
+        .unwrap_or(created_at);
+    let title = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(normalize_text)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(Value::as_str)
+                .map(normalize_text)
+                .filter(|text| !text.is_empty())
+        })
+        .unwrap_or_else(|| "Untitled Cursor session".into());
+    let preview = value
+        .get("latestConversationSummary")
+        .and_then(|summary| summary.get("summary"))
+        .and_then(|summary| summary.get("summary"))
+        .and_then(Value::as_str)
+        .map(normalize_text)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(Value::as_str)
+                .map(normalize_text)
+                .filter(|text| !text.is_empty())
+        })
+        .unwrap_or_else(|| "No preview available.".into());
+    let total_tokens = parse_cursor_session_token_total(value).unwrap_or(0);
+    let parsed_cost_usd = value.get("usageData").and_then(parse_usage_data_cost_usd);
+    let cost_usd = parsed_cost_usd.unwrap_or(0.0);
+    let is_priced = parsed_cost_usd.is_some();
+
+    let session = SessionRecord {
+        updated_at,
+        summary: SessionSummary {
+            id: composer_id.to_string(),
+            source_id: SOURCE_ID.into(),
+            title: truncate(&title, 72),
+            preview: truncate(&preview, 180),
+            source: SOURCE_NAME.into(),
+            workspace: workspace.unwrap_or_else(|| "unknown".into()),
+            model: "unknown".into(),
+            started_at: created_at
+                .with_timezone(&Local)
+                .format("%b %-d %H:%M")
+                .to_string(),
+            total_tokens,
+            cost_usd,
+            priced_sessions: if is_priced { 1 } else { 0 },
+            pending_pricing_sessions: if is_priced { 0 } else { 1 },
+            pricing_coverage: if is_priced {
+                PricingCoverage::Actual
+            } else {
+                PricingCoverage::Pending
+            },
+            pricing_state: if is_priced {
+                "actual".into()
+            } else {
+                "pending".into()
+            },
+            calculation_method: if is_priced {
+                CalculationMethod::Native
+            } else {
+                CalculationMethod::Estimated
+            },
+            status: "indexed".into(),
+        },
+    };
+    let usage_event = is_priced.then(|| {
+        build_cursor_pricing_event(
+            composer_id,
+            updated_at,
+            total_tokens,
+            cost_usd,
+            value
+                .get("usageData")
+                .and_then(Value::as_object)
+                .and_then(|usage_data| {
+                    (usage_data.len() == 1)
+                        .then(|| usage_data.keys().next().map(|key| key.to_string()))
+                        .flatten()
+                }),
+        )
+    });
+
+    Some((session, usage_event))
+}
+
+fn parse_usage_data_cost_usd(value: &Value) -> Option<f64> {
+    let usage_data = value.as_object()?;
+    if usage_data.is_empty() {
+        return None;
+    }
+
+    let mut total_cost_in_cents = 0.0;
+    for entry in usage_data.values() {
+        let cost_in_cents = entry.get("costInCents")?.as_f64()?;
+        if !cost_in_cents.is_finite() || cost_in_cents < 0.0 {
+            return None;
+        }
+        total_cost_in_cents += cost_in_cents;
+    }
+
+    Some(total_cost_in_cents / 100.0)
+}
+
+fn parse_cursor_session_token_total(value: &Value) -> Option<u64> {
+    parse_direct_token_total(value)
+        .or_else(|| value.get("usage").and_then(parse_direct_token_total))
+        .or_else(|| value.get("metrics").and_then(parse_direct_token_total))
+        .or_else(|| {
+            let usage_data = value.get("usageData")?.as_object()?;
+            let mut total = 0u64;
+            let mut found_any = false;
+            for entry in usage_data.values() {
+                let entry_total = parse_direct_token_total(entry)?;
+                found_any = true;
+                total = total.saturating_add(entry_total);
+            }
+            found_any.then_some(total)
+        })
+}
+
+fn parse_direct_token_total(value: &Value) -> Option<u64> {
+    ["tokenCount", "totalTokens", "total_tokens"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+}
+
+fn build_cursor_pricing_event(
+    session_id: &str,
+    occurred_at: DateTime<Utc>,
+    total_tokens: u64,
+    real_cost_usd: f64,
+    model: Option<String>,
+) -> UsageEvent {
+    UsageEvent {
+        source_id: SOURCE_ID,
+        occurred_at,
+        model: model.unwrap_or_else(|| "unknown".into()),
+        token_breakdown: TokenBreakdown {
+            input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            other_tokens: total_tokens,
+        },
+        total_tokens,
+        calculation_method: CalculationMethod::Native,
+        session_id: session_id.to_string(),
+        explicit_cost_usd: Some(real_cost_usd),
+    }
 }
 
 fn composer_workspace_map(workspace_storage: &Path) -> std::collections::HashMap<String, String> {
@@ -321,5 +434,93 @@ fn truncate(text: &str, max_chars: usize) -> String {
             .take(max_chars.saturating_sub(1))
             .collect::<String>();
         format!("{truncated}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_cursor_usage_data_into_real_session_cost() {
+        let value = json!({
+            "createdAt": 1_710_000_000_000i64,
+            "lastUpdatedAt": 1_710_000_123_000i64,
+            "name": "Real cost session",
+            "usageData": {
+                "gpt-4.1": { "costInCents": 125 },
+                "claude-3.7": { "costInCents": 75 }
+            }
+        });
+
+        let (session, usage_event) =
+            parse_cursor_session("composer-1", &value, None).expect("session should parse");
+
+        assert_eq!(session.summary.cost_usd, 2.0);
+        assert_eq!(session.summary.pricing_coverage, PricingCoverage::Actual);
+        assert_eq!(session.summary.pricing_state, "actual");
+        let usage_event = usage_event.expect("priced session should emit usage event");
+        assert_eq!(usage_event.explicit_cost_usd, Some(2.0));
+        assert_eq!(usage_event.session_id, "composer-1");
+    }
+
+    #[test]
+    fn cursor_session_stays_pending_when_usage_data_costs_are_invalid() {
+        let malformed = json!({
+            "createdAt": 1_710_000_000_000i64,
+            "lastUpdatedAt": 1_710_000_123_000i64,
+            "usageData": {
+                "gpt-4.1": { "costInCents": 125 },
+                "claude-3.7": { "costInCents": "oops" }
+            }
+        });
+        let missing = json!({
+            "createdAt": 1_710_000_000_000i64,
+            "lastUpdatedAt": 1_710_000_123_000i64,
+            "usageData": {
+                "gpt-4.1": {}
+            }
+        });
+
+        let (malformed_session, malformed_event) =
+            parse_cursor_session("composer-1", &malformed, None).expect("session should parse");
+        let (missing_session, missing_event) =
+            parse_cursor_session("composer-2", &missing, None).expect("session should parse");
+
+        assert_eq!(malformed_session.summary.cost_usd, 0.0);
+        assert_eq!(
+            malformed_session.summary.pricing_coverage,
+            PricingCoverage::Pending
+        );
+        assert_eq!(malformed_session.summary.pricing_state, "pending");
+        assert!(malformed_event.is_none());
+
+        assert_eq!(missing_session.summary.cost_usd, 0.0);
+        assert_eq!(
+            missing_session.summary.pricing_coverage,
+            PricingCoverage::Pending
+        );
+        assert_eq!(missing_session.summary.pricing_state, "pending");
+        assert!(missing_event.is_none());
+    }
+
+    #[test]
+    fn cursor_session_preserves_token_totals_when_token_count_is_present() {
+        let value = json!({
+            "createdAt": 1_710_000_000_000i64,
+            "lastUpdatedAt": 1_710_000_123_000i64,
+            "usageData": {
+                "gpt-4.1": { "costInCents": 240 }
+            },
+            "tokenCount": 4321
+        });
+
+        let (session, usage_event) =
+            parse_cursor_session("composer-1", &value, None).expect("session should parse");
+
+        assert_eq!(session.summary.total_tokens, 4321);
+        let usage_event = usage_event.expect("priced session should emit usage event");
+        assert_eq!(usage_event.total_tokens, 4321);
     }
 }

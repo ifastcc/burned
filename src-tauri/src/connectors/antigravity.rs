@@ -49,17 +49,13 @@ fn collect_antigravity() -> Result<SourceReport> {
         return Ok(missing_report());
     };
 
-    let logs_root = antigravity_logs_path();
-    let conversation_dir = dirs::home_dir().map(|home| {
-        home.join(".gemini")
-            .join("antigravity")
-            .join("conversations")
-    });
-    let session_count = conversation_dir
-        .filter(|path| path.exists())
-        .and_then(|path| fs::read_dir(path).ok())
-        .map(|entries| entries.filter_map(std::result::Result::ok).count() as u32);
+    let brain_root = antigravity_primary_path().map(|path| path.join("brain"));
     let sessions = antigravity_sessions();
+    let logs_root = antigravity_logs_path();
+    let session_count = brain_root
+        .as_deref()
+        .and_then(indexed_session_count)
+        .or(Some(sessions.len() as u32));
 
     Ok(SourceReport {
         status: SourceStatus {
@@ -135,6 +131,10 @@ fn antigravity_sessions() -> Vec<SessionRecord> {
     let Some(brain_root) = antigravity_primary_path().map(|path| path.join("brain")) else {
         return Vec::new();
     };
+    antigravity_sessions_from_brain_root(&brain_root)
+}
+
+fn antigravity_sessions_from_brain_root(brain_root: &Path) -> Vec<SessionRecord> {
     let Ok(entries) = fs::read_dir(&brain_root) else {
         return Vec::new();
     };
@@ -209,6 +209,16 @@ fn antigravity_sessions() -> Vec<SessionRecord> {
     sessions
 }
 
+fn indexed_session_count(brain_root: &Path) -> Option<u32> {
+    fs::read_dir(brain_root).ok().map(|entries| {
+        entries
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir() && path.join("task.md").exists())
+            .count() as u32
+    })
+}
+
 fn extract_task_title(task_content: &str) -> String {
     task_content
         .lines()
@@ -263,5 +273,31 @@ fn truncate(text: &str, max_chars: usize) -> String {
             .take(max_chars.saturating_sub(1))
             .collect::<String>();
         format!("{truncated}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn indexed_session_count_uses_brain_directory_only() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("burned-antigravity-{unique}"));
+        let brain_root = root.join("brain");
+        fs::create_dir_all(brain_root.join("session-a")).expect("create brain session");
+        fs::create_dir_all(brain_root.join("session-b")).expect("create brain session");
+        fs::write(brain_root.join("session-a").join("task.md"), "# A").expect("write task");
+        fs::write(brain_root.join("session-b").join("task.md"), "# B").expect("write task");
+        fs::write(brain_root.join("not-a-directory"), "ignore").expect("write file");
+
+        let count = indexed_session_count(&brain_root);
+
+        assert_eq!(count, Some(2));
+        let _ = fs::remove_dir_all(root);
     }
 }

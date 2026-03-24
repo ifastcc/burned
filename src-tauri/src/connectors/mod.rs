@@ -39,10 +39,8 @@ impl UsageEvent {
 
     #[allow(dead_code)]
     pub fn pricing_coverage(&self) -> PricingCoverage {
-        if self.explicit_cost_usd.is_some() {
+        if self.estimated_cost_usd().is_some() {
             PricingCoverage::Actual
-        } else if source_supports_estimated_cost(self.source_id) {
-            PricingCoverage::Partial
         } else {
             PricingCoverage::Pending
         }

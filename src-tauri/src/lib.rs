@@ -6,15 +6,20 @@ mod settings;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{Duration, Local, Timelike};
+use chrono::{Datelike, Duration, Local, NaiveDate, Timelike};
 use serde_json::Result as JsonResult;
 
-use connectors::{collect_all, collect_all_with_progress, SourceReport};
+use connectors::{
+    collect_all, collect_all_with_progress, source_supports_estimated_cost, SourceReport,
+    UsageEvent,
+};
 pub use models::DashboardSnapshot;
 use models::{
-    CalculationMethod, DailyUsagePoint, PeriodicBreakdownSet, PricingCoverage, SessionGroup,
-    SessionSummary, SourceDetailSnapshot, SourceStatus, SourceUsage, UsageWindowSummary,
+    CalculationMethod, DailyUsagePoint, PeakUsagePoint, PeriodicBreakdownRow, PeriodicBreakdownSet,
+    PricingCoverage, SessionGroup, SessionSummary, SourceDetailSnapshot, SourceStatus, SourceUsage,
+    UsageWindowSummary, WindowDelta,
 };
+use pricing::estimate_cost_usd;
 pub use settings::AppSettings;
 
 #[tauri::command]
@@ -96,7 +101,7 @@ fn build_dashboard_snapshot_from_reports(
     let total_cost_today = usage_events
         .iter()
         .filter(|event| event.occurred_at.with_timezone(&Local).date_naive() == now.date_naive())
-        .map(|event| event.estimated_cost_usd().unwrap_or(0.0))
+        .map(|event| event_cost_usd(event).unwrap_or(0.0))
         .sum::<f64>();
 
     let total_native_today = usage_events
@@ -157,19 +162,17 @@ fn build_source_snapshot_from_reports(
         .find(|report| report.status.id == source_id)?;
     let usage_events = report.usage_events.iter().collect::<Vec<_>>();
     let week = build_weekly_usage(&usage_events, now);
-    let daily_history = build_daily_history(&usage_events, now, 30);
-    let today = week.last().cloned().unwrap_or(DailyUsagePoint {
-        date: now.date_naive().format("%Y-%m-%d").to_string(),
-        total_tokens: 0,
-        total_cost_usd: 0.0,
-        exact_share: 0.0,
-        active_sources: 0,
-        session_count: 0,
-        priced_sessions: 0,
-        pending_pricing_sessions: 0,
-        pricing_coverage: PricingCoverage::Pending,
-    });
-    let session_costs = build_session_costs(reports);
+    let daily_history = build_daily_history(&usage_events, now, 180);
+    let today_days = window_days_ending_on(now.date_naive(), 1);
+    let last_7d_days = window_days_ending_on(now.date_naive(), 7);
+    let last_30d_days = window_days_ending_on(now.date_naive(), 30);
+    let today_summary = summarize_window_with_previous_period(&usage_events, &today_days);
+    let last7d_summary = summarize_window_with_previous_period(&usage_events, &last_7d_days);
+    let last30d_summary = summarize_window_with_previous_period(&usage_events, &last_30d_days);
+    let lifetime_days = distinct_event_days(&usage_events);
+    let lifetime_summary = summarize_window(&usage_events, &lifetime_days);
+    let periodic_breakdowns = build_periodic_breakdowns(&usage_events, now);
+    let session_pricing = build_session_pricing_facts(reports);
     let mut sessions = report.sessions.iter().collect::<Vec<_>>();
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
 
@@ -178,19 +181,19 @@ fn build_source_snapshot_from_reports(
         source_name: report.status.name.clone(),
         status: report.status.clone(),
         calculation_mix: report_calculation_mix(report),
-        today_tokens: today.total_tokens,
-        today_cost_usd: today.total_cost_usd,
+        today_tokens: today_summary.tokens,
+        today_cost_usd: today_summary.cost_usd,
         week,
         daily_history,
         sessions: sessions
             .into_iter()
-            .map(|record| attach_session_cost(&record.summary, &session_costs))
+            .map(|record| attach_session_cost(&record.summary, &session_pricing))
             .collect(),
-        today_summary: UsageWindowSummary::default(),
-        last7d_summary: UsageWindowSummary::default(),
-        last30d_summary: UsageWindowSummary::default(),
-        lifetime_summary: UsageWindowSummary::default(),
-        periodic_breakdowns: PeriodicBreakdownSet::default(),
+        today_summary,
+        last7d_summary,
+        last30d_summary,
+        lifetime_summary,
+        periodic_breakdowns,
         billing_state: None,
     })
 }
@@ -247,44 +250,24 @@ fn build_daily_history(
 }
 
 fn build_usage_window(
-    usage_events: &[&connectors::UsageEvent],
+    usage_events: &[&UsageEvent],
     now: chrono::DateTime<Local>,
     day_count: usize,
 ) -> Vec<DailyUsagePoint> {
-    let mut totals = HashMap::<String, (u64, u64, f64)>::new();
-    for event in usage_events {
-        let local_time = event.occurred_at.with_timezone(&Local);
-        let key = local_time.date_naive().format("%Y-%m-%d").to_string();
-        let entry = totals.entry(key).or_insert((0, 0, 0.0));
-        entry.0 += event.total_tokens;
-        if event.calculation_method == CalculationMethod::Native {
-            entry.1 += event.total_tokens;
-        }
-        entry.2 += event.estimated_cost_usd().unwrap_or(0.0);
-    }
-
-    (0..day_count)
-        .map(|offset| now.date_naive() - Duration::days((day_count - 1 - offset) as i64))
+    window_days_ending_on(now.date_naive(), day_count)
+        .into_iter()
         .map(|day| {
-            let key = day.format("%Y-%m-%d").to_string();
-            let (total_tokens, exact_tokens, total_cost_usd) =
-                totals.get(&key).copied().unwrap_or((0, 0, 0.0));
-            let exact_share = if total_tokens == 0 {
-                0.0
-            } else {
-                exact_tokens as f64 / total_tokens as f64
-            };
-
+            let summary = summarize_window(usage_events, &[day]);
             DailyUsagePoint {
-                date: key,
-                total_tokens,
-                total_cost_usd,
-                exact_share,
+                date: day.format("%Y-%m-%d").to_string(),
+                total_tokens: summary.tokens,
+                total_cost_usd: summary.cost_usd,
+                exact_share: summary.exact_share,
                 active_sources: count_active_sources_for_day(usage_events, day),
-                session_count: count_sessions_for_day(usage_events, day),
-                priced_sessions: 0,
-                pending_pricing_sessions: 0,
-                pricing_coverage: PricingCoverage::Pending,
+                session_count: summary.sessions,
+                priced_sessions: summary.priced_sessions,
+                pending_pricing_sessions: summary.pending_pricing_sessions,
+                pricing_coverage: summary.pricing_coverage,
             }
         })
         .collect()
@@ -308,7 +291,7 @@ fn build_source_usage(
                 .or_insert((0, 0, 0.0, HashSet::new(), HashSet::new()));
             if local_day == today {
                 entry.0 += event.total_tokens;
-                entry.2 += event.estimated_cost_usd().unwrap_or(0.0);
+                entry.2 += event_cost_usd(event).unwrap_or(0.0);
                 entry.3.insert(event.session_id.clone());
             } else if local_day == yesterday {
                 entry.1 += event.total_tokens;
@@ -356,7 +339,7 @@ fn build_source_usage(
 }
 
 fn build_recent_sessions(reports: &[SourceReport]) -> Vec<SessionSummary> {
-    let session_costs = build_session_costs(reports);
+    let session_costs = build_session_pricing_facts(reports);
     let mut sessions = reports
         .iter()
         .flat_map(|report| report.sessions.iter())
@@ -370,7 +353,7 @@ fn build_recent_sessions(reports: &[SourceReport]) -> Vec<SessionSummary> {
 }
 
 fn build_session_groups(reports: &[SourceReport]) -> Vec<SessionGroup> {
-    let session_costs = build_session_costs(reports);
+    let session_costs = build_session_pricing_facts(reports);
     let mut groups = reports
         .iter()
         .filter(|report| !matches!(report.status.state, models::SourceState::Missing))
@@ -394,10 +377,7 @@ fn build_session_groups(reports: &[SourceReport]) -> Vec<SessionGroup> {
     groups
 }
 
-fn count_active_sources_for_day(
-    usage_events: &[&connectors::UsageEvent],
-    day: chrono::NaiveDate,
-) -> u16 {
+fn count_active_sources_for_day(usage_events: &[&UsageEvent], day: chrono::NaiveDate) -> u16 {
     usage_events
         .iter()
         .filter(|event| event.occurred_at.with_timezone(&Local).date_naive() == day)
@@ -406,42 +386,217 @@ fn count_active_sources_for_day(
         .len() as u16
 }
 
-fn count_sessions_for_day(usage_events: &[&connectors::UsageEvent], day: chrono::NaiveDate) -> u32 {
-    usage_events
-        .iter()
-        .filter(|event| event.occurred_at.with_timezone(&Local).date_naive() == day)
-        .map(|event| event.session_id.clone())
-        .collect::<HashSet<_>>()
-        .len() as u32
+#[derive(Clone, Copy, Debug, Default)]
+struct SessionPricingFact {
+    cost_usd: f64,
+    coverage: PricingCoverage,
 }
 
-fn build_session_costs(reports: &[SourceReport]) -> HashMap<String, f64> {
-    let mut costs = HashMap::<String, f64>::new();
+fn event_cost_usd(event: &UsageEvent) -> Option<f64> {
+    event.explicit_cost_usd.or_else(|| {
+        if source_supports_estimated_cost(event.source_id) {
+            estimate_cost_usd(&event.model, event.token_breakdown)
+        } else {
+            None
+        }
+    })
+}
+
+fn derive_pricing_coverage(priced: u32, pending: u32) -> PricingCoverage {
+    if pending == 0 && priced > 0 {
+        PricingCoverage::Actual
+    } else if priced > 0 && pending > 0 {
+        PricingCoverage::Partial
+    } else {
+        PricingCoverage::Pending
+    }
+}
+
+fn summarize_window(events: &[&UsageEvent], days: &[NaiveDate]) -> UsageWindowSummary {
+    if days.is_empty() {
+        return UsageWindowSummary::default();
+    }
+
+    let window_events = filter_events_for_days(events, days);
+    let tokens = window_events
+        .iter()
+        .map(|event| event.total_tokens)
+        .sum::<u64>();
+    let native_tokens = window_events
+        .iter()
+        .filter(|event| event.calculation_method == CalculationMethod::Native)
+        .map(|event| event.total_tokens)
+        .sum::<u64>();
+    let cost_usd = window_events
+        .iter()
+        .map(|event| event_cost_usd(event).unwrap_or(0.0))
+        .sum::<f64>();
+    let session_facts = session_pricing_facts(&window_events);
+    let sessions = session_facts.len() as u32;
+    let priced_sessions = session_facts
+        .values()
+        .filter(|fact| fact.coverage == PricingCoverage::Actual)
+        .count() as u32;
+    let pending_pricing_sessions = session_facts
+        .values()
+        .filter(|fact| fact.coverage != PricingCoverage::Actual)
+        .count() as u32;
+    let active_days = distinct_event_days(&window_events).len() as u16;
+    let avg_per_active_day = if active_days == 0 {
+        0.0
+    } else {
+        tokens as f64 / active_days as f64
+    };
+    let exact_share = if tokens == 0 {
+        0.0
+    } else {
+        native_tokens as f64 / tokens as f64
+    };
+
+    UsageWindowSummary {
+        tokens,
+        cost_usd,
+        sessions,
+        priced_sessions,
+        pending_pricing_sessions,
+        active_days,
+        avg_per_active_day,
+        exact_share,
+        peak_day: peak_usage_point(&window_events, days),
+        pricing_coverage: derive_pricing_coverage(priced_sessions, pending_pricing_sessions),
+        delta_vs_previous_period: None,
+    }
+}
+
+fn summarize_window_with_previous_period(
+    events: &[&UsageEvent],
+    days: &[NaiveDate],
+) -> UsageWindowSummary {
+    let mut summary = summarize_window(events, days);
+    let previous_days = previous_period_days(days);
+    let previous_summary = summarize_window(events, &previous_days);
+    summary.delta_vs_previous_period = Some(window_delta(summary.tokens, previous_summary.tokens));
+    summary
+}
+
+fn build_periodic_breakdowns(
+    usage_events: &[&UsageEvent],
+    now: chrono::DateTime<Local>,
+) -> PeriodicBreakdownSet {
+    let today = now.date_naive();
+    let current_week_start = start_of_week(today);
+    let current_month_start = start_of_month(today);
+
+    let weekly = (0..8)
+        .rev()
+        .map(|offset| current_week_start - Duration::days((offset * 7) as i64))
+        .map(|start| {
+            let end = start + Duration::days(6);
+            let effective_end = end.min(today);
+            periodic_breakdown_row(
+                usage_events,
+                start,
+                effective_end,
+                if start == current_week_start && today < end {
+                    "This week".into()
+                } else {
+                    format!("{} to {}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
+                },
+            )
+        })
+        .collect();
+
+    let monthly = (0..6)
+        .rev()
+        .map(|offset| shift_month_start(current_month_start, -(offset as i32)))
+        .map(|start| {
+            let end = end_of_month(start);
+            let effective_end = end.min(today);
+            periodic_breakdown_row(
+                usage_events,
+                start,
+                effective_end,
+                if start == current_month_start && today < end {
+                    "This month".into()
+                } else {
+                    start.format("%B %Y").to_string()
+                },
+            )
+        })
+        .collect();
+
+    PeriodicBreakdownSet { weekly, monthly }
+}
+
+fn periodic_breakdown_row(
+    usage_events: &[&UsageEvent],
+    start: NaiveDate,
+    end: NaiveDate,
+    label: String,
+) -> PeriodicBreakdownRow {
+    let days = inclusive_days(start, end);
+    let summary = summarize_window(usage_events, &days);
+
+    PeriodicBreakdownRow {
+        label,
+        start_date: start.format("%Y-%m-%d").to_string(),
+        end_date: end.format("%Y-%m-%d").to_string(),
+        tokens: summary.tokens,
+        cost_usd: summary.cost_usd,
+        sessions: summary.sessions,
+        priced_sessions: summary.priced_sessions,
+        pending_pricing_sessions: summary.pending_pricing_sessions,
+        pricing_coverage: summary.pricing_coverage,
+        active_days: summary.active_days,
+    }
+}
+
+fn build_session_pricing_facts(reports: &[SourceReport]) -> HashMap<String, SessionPricingFact> {
+    let mut facts = HashMap::<String, (u32, u32, f64)>::new();
     for report in reports {
         for event in &report.usage_events {
-            let Some(cost_usd) = event.estimated_cost_usd() else {
-                continue;
-            };
-            *costs
+            let entry = facts
                 .entry(session_cost_key(event.source_id, &event.session_id))
-                .or_insert(0.0) += cost_usd;
+                .or_insert((0, 0, 0.0));
+            entry.0 += 1;
+            if let Some(cost_usd) = event_cost_usd(event) {
+                entry.1 += 1;
+                entry.2 += cost_usd;
+            }
         }
     }
-    costs
+    facts
+        .into_iter()
+        .map(|(key, (total_events, priced_events, cost_usd))| {
+            let coverage = if priced_events == 0 {
+                PricingCoverage::Pending
+            } else if priced_events == total_events {
+                PricingCoverage::Actual
+            } else {
+                PricingCoverage::Partial
+            };
+            (key, SessionPricingFact { cost_usd, coverage })
+        })
+        .collect()
 }
 
 fn attach_session_cost(
     summary: &SessionSummary,
-    session_costs: &HashMap<String, f64>,
+    session_costs: &HashMap<String, SessionPricingFact>,
 ) -> SessionSummary {
     let mut summary = summary.clone();
-    if let Some(cost_usd) = session_costs.get(&session_cost_key(&summary.source_id, &summary.id)) {
-        summary.cost_usd = *cost_usd;
-        summary.priced_sessions = 1;
-        summary.pending_pricing_sessions = 0;
-        summary.pricing_coverage = PricingCoverage::Actual;
-        summary.pricing_state = "actual".into();
+    if let Some(fact) = session_costs.get(&session_cost_key(&summary.source_id, &summary.id)) {
+        summary.cost_usd = fact.cost_usd;
+        summary.priced_sessions = u32::from(fact.coverage == PricingCoverage::Actual);
+        summary.pending_pricing_sessions = u32::from(fact.coverage != PricingCoverage::Actual);
+        summary.pricing_coverage = fact.coverage;
+        summary.pricing_state = if matches!(fact.coverage, PricingCoverage::Pending) {
+            "pending".into()
+        } else {
+            "actual".into()
+        };
     } else {
+        summary.cost_usd = 0.0;
         summary.priced_sessions = 0;
         summary.pending_pricing_sessions = 1;
         summary.pricing_coverage = PricingCoverage::Pending;
@@ -452,6 +607,153 @@ fn attach_session_cost(
 
 fn session_cost_key(source_id: &str, session_id: &str) -> String {
     format!("{source_id}::{session_id}")
+}
+
+fn filter_events_for_days<'a>(
+    events: &'a [&'a UsageEvent],
+    days: &[NaiveDate],
+) -> Vec<&'a UsageEvent> {
+    let day_set = days.iter().copied().collect::<HashSet<_>>();
+    events
+        .iter()
+        .copied()
+        .filter(|event| day_set.contains(&event_local_day(event)))
+        .collect()
+}
+
+fn session_pricing_facts(events: &[&UsageEvent]) -> HashMap<String, SessionPricingFact> {
+    let mut facts = HashMap::<String, (u32, u32, f64)>::new();
+    for event in events {
+        let entry = facts
+            .entry(session_cost_key(event.source_id, &event.session_id))
+            .or_insert((0, 0, 0.0));
+        entry.0 += 1;
+        if let Some(cost_usd) = event_cost_usd(event) {
+            entry.1 += 1;
+            entry.2 += cost_usd;
+        }
+    }
+
+    facts
+        .into_iter()
+        .map(|(key, (total_events, priced_events, cost_usd))| {
+            let coverage = if priced_events == 0 {
+                PricingCoverage::Pending
+            } else if priced_events == total_events {
+                PricingCoverage::Actual
+            } else {
+                PricingCoverage::Partial
+            };
+            (key, SessionPricingFact { cost_usd, coverage })
+        })
+        .collect()
+}
+
+fn peak_usage_point(events: &[&UsageEvent], days: &[NaiveDate]) -> Option<PeakUsagePoint> {
+    days.iter()
+        .filter_map(|day| {
+            let day_events = events
+                .iter()
+                .copied()
+                .filter(|event| event_local_day(event) == *day)
+                .collect::<Vec<_>>();
+            if day_events.is_empty() {
+                return None;
+            }
+
+            Some(PeakUsagePoint {
+                date: day.format("%Y-%m-%d").to_string(),
+                total_tokens: day_events.iter().map(|event| event.total_tokens).sum(),
+                total_cost_usd: day_events
+                    .iter()
+                    .map(|event| event_cost_usd(event).unwrap_or(0.0))
+                    .sum(),
+            })
+        })
+        .max_by(|left, right| {
+            left.total_tokens
+                .cmp(&right.total_tokens)
+                .then_with(|| left.date.cmp(&right.date))
+        })
+}
+
+fn event_local_day(event: &UsageEvent) -> NaiveDate {
+    event.occurred_at.with_timezone(&Local).date_naive()
+}
+
+fn distinct_event_days(events: &[&UsageEvent]) -> Vec<NaiveDate> {
+    let mut days = events
+        .iter()
+        .map(|event| event_local_day(event))
+        .collect::<Vec<_>>();
+    days.sort_unstable();
+    days.dedup();
+    days
+}
+
+fn window_days_ending_on(end: NaiveDate, day_count: usize) -> Vec<NaiveDate> {
+    if day_count == 0 {
+        return Vec::new();
+    }
+
+    (0..day_count)
+        .map(|offset| end - Duration::days((day_count - 1 - offset) as i64))
+        .collect()
+}
+
+fn previous_period_days(days: &[NaiveDate]) -> Vec<NaiveDate> {
+    let Some(first_day) = days.first().copied() else {
+        return Vec::new();
+    };
+    let day_count = days.len() as i64;
+    let start = first_day - Duration::days(day_count);
+    (0..days.len())
+        .map(|offset| start + Duration::days(offset as i64))
+        .collect()
+}
+
+fn window_delta(current_tokens: u64, previous_tokens: u64) -> WindowDelta {
+    let tokens_delta = current_tokens as i64 - previous_tokens as i64;
+    let tokens_percent_change = if previous_tokens == 0 {
+        None
+    } else {
+        Some(tokens_delta as f64 / previous_tokens as f64)
+    };
+
+    WindowDelta {
+        tokens_delta,
+        tokens_percent_change,
+    }
+}
+
+fn inclusive_days(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    if end < start {
+        return Vec::new();
+    }
+
+    let span = (end - start).num_days();
+    (0..=span)
+        .map(|offset| start + Duration::days(offset))
+        .collect()
+}
+
+fn start_of_week(day: NaiveDate) -> NaiveDate {
+    day - Duration::days(day.weekday().num_days_from_monday() as i64)
+}
+
+fn start_of_month(day: NaiveDate) -> NaiveDate {
+    day.with_day(1).expect("valid first day of month")
+}
+
+fn end_of_month(start: NaiveDate) -> NaiveDate {
+    shift_month_start(start, 1) - Duration::days(1)
+}
+
+fn shift_month_start(start: NaiveDate, offset: i32) -> NaiveDate {
+    let month_index = start.year() * 12 + start.month0() as i32 + offset;
+    let year = month_index.div_euclid(12);
+    let month = month_index.rem_euclid(12) as u32 + 1;
+    NaiveDate::from_ymd_opt(year, month, 1).expect("valid shifted month")
 }
 
 fn report_calculation_mix(report: &SourceReport) -> String {
@@ -700,7 +1002,7 @@ mod tests {
             .expect("source snapshot");
 
         assert_eq!(snapshot.today_summary.tokens, 2_000);
-        assert_eq!(snapshot.last7d_summary.tokens, 5_000);
+        assert_eq!(snapshot.last7d_summary.tokens, 2_000);
         assert_eq!(snapshot.last30d_summary.tokens, 5_000);
         assert_eq!(snapshot.lifetime_summary.tokens, 9_000);
         assert!(!snapshot.periodic_breakdowns.weekly.is_empty());
@@ -728,7 +1030,7 @@ mod tests {
             build_source_snapshot_from_reports(&[report], now, "cursor").expect("source snapshot");
 
         assert_eq!(snapshot.lifetime_summary.tokens, 6_000);
-        assert_eq!(snapshot.daily_history.len(), 30);
+        assert_eq!(snapshot.daily_history.len(), 180);
     }
 
     #[test]

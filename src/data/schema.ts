@@ -11,6 +11,7 @@ export type DailyUsagePoint = {
 };
 
 export type SourceUsage = {
+  sourceId: string;
   source: string;
   tokens: number;
   costUsd: number;
@@ -66,6 +67,18 @@ export type DashboardSnapshot = {
   sessions: SessionSummary[];
   sessionGroups: SessionGroup[];
   sourceStatuses: SourceStatus[];
+};
+
+export type SourceDetailSnapshot = {
+  sourceId: string;
+  sourceName: string;
+  status: SourceStatus;
+  calculationMix: CalculationMethod | "mixed";
+  todayTokens: number;
+  todayCostUsd: number;
+  week: DailyUsagePoint[];
+  dailyHistory: DailyUsagePoint[];
+  sessions: SessionSummary[];
 };
 
 export type CherryStudioSettings = {

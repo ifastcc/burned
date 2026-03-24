@@ -11,8 +11,11 @@ use serde::Deserialize;
 use serde_json::Value;
 use zip::ZipArchive;
 
-use crate::connectors::{SessionRecord, SourceConnector, SourceReport, UsageEvent};
+use crate::connectors::{
+    report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
+};
 use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::pricing::TokenBreakdown;
 use crate::settings::{default_cherry_backup_dir, load_app_settings, CherryStudioSettings};
 
 const SOURCE_ID: &str = "cherry_studio";
@@ -25,6 +28,7 @@ pub struct CherryStudioConnector;
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiServerProfile {
+    #[serde(rename = "baseURL", alias = "baseUrl")]
     base_url: Option<String>,
     api_key: Option<String>,
     enabled: Option<bool>,
@@ -46,6 +50,8 @@ struct HistoryTopic {
     assistant_name: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
+    first_message_at: Option<String>,
+    last_message_at: Option<String>,
     preview: Option<String>,
 }
 
@@ -103,6 +109,18 @@ struct BackupTopicAccumulator {
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,
     total_tokens: u64,
+}
+
+#[derive(Default)]
+struct UsageMetrics {
+    model: Option<String>,
+    token_breakdown: TokenBreakdown,
+}
+
+impl UsageMetrics {
+    fn total_tokens(&self) -> u64 {
+        self.token_breakdown.total_tokens()
+    }
 }
 
 impl SourceConnector for CherryStudioConnector {
@@ -184,22 +202,16 @@ fn collect_cherry_studio() -> Result<SourceReport> {
         .as_ref()
         .map(|import| display_path(import.archive_path.clone()));
 
-    if let Some(import) = backup_import {
+    if let Some(import) = backup_import.as_ref() {
         backup_topic_count = import.topic_count;
-        backup_native_topics = import
-            .sessions
-            .iter()
-            .filter(|session| session.summary.total_tokens > 0)
-            .count() as u32;
-        usage_events.extend(import.usage_events);
-
-        for session in import.sessions {
-            let session_id = session.summary.id.clone();
-            if let Some(existing) = sessions_by_id.get_mut(&session_id) {
-                merge_session_record(existing, session);
-            } else {
-                sessions_by_id.insert(session_id, session);
-            }
+        let backup_applied =
+            apply_backup_import(&mut sessions_by_id, &mut usage_events, import, history_ok);
+        if backup_applied {
+            backup_native_topics = import
+                .sessions
+                .iter()
+                .filter(|session| session.summary.total_tokens > 0)
+                .count() as u32;
         }
     }
 
@@ -207,7 +219,11 @@ fn collect_cherry_studio() -> Result<SourceReport> {
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions.truncate(12);
 
-    let ordinary_topics = history_total.unwrap_or(0).max(backup_topic_count);
+    let ordinary_topics = if history_ok {
+        history_total.unwrap_or(0)
+    } else {
+        history_total.unwrap_or(0).max(backup_topic_count)
+    };
     let session_count = if ordinary_topics > 0 || agent_session_count > 0 {
         Some(ordinary_topics.saturating_add(agent_session_count))
     } else {
@@ -222,19 +238,14 @@ fn collect_cherry_studio() -> Result<SourceReport> {
 
     let note = if history_ok {
         let topic_total = history_total.unwrap_or(ordinary_topics);
-        if backup_native_topics > 0 {
+        if !usage_events.is_empty() {
             format!(
-                "Local History API is live for {topic_total} ordinary topics. Burned also parsed the latest legacy backup zip to recover native token usage for {backup_native_topics} topic(s). Agent sessions are scanned from agents.db{}.",
-                backup_note(backup_count)
-            )
-        } else if !usage_events.is_empty() {
-            format!(
-                "Local History API is live for {topic_total} ordinary topics. Agent sessions are scanned from agents.db, and native usage is available where Cherry persisted it{}.",
+                "Local History API is live for {topic_total} ordinary topics. Session timing comes from live history timestamps, agent sessions are scanned from agents.db, and legacy backup zips stay on standby as fallback{}.",
                 backup_note(backup_count)
             )
         } else {
             format!(
-                "Local History API is live for {topic_total} ordinary topics. Agent sessions are scanned from agents.db, but stable per-topic token usage is still unavailable without a compatible backup export{}.",
+                "Local History API is live for {topic_total} ordinary topics. Session timing comes from live history timestamps; ordinary topic token usage still needs a fallback source, so legacy backup zips are kept on standby{}.",
                 backup_note(backup_count)
             )
         }
@@ -325,6 +336,10 @@ fn fetch_history_sessions(profile: &ApiServerProfile) -> Result<(Vec<SessionReco
     let payload: TopicListResponse = response
         .into_json()
         .context("parse Cherry Studio history topics response")?;
+    report_scan_detail(
+        SOURCE_NAME,
+        format!("Loaded {} recent topics", payload.topics.len()),
+    );
 
     let model_map = fetch_topic_model_map(&agent, base_url, api_key, &payload.topics);
     let mut sessions = payload
@@ -349,8 +364,13 @@ fn fetch_topic_model_map(
     topics: &[HistoryTopic],
 ) -> HashMap<String, String> {
     let mut model_map = HashMap::new();
+    let enrich_count = topics.len().min(TRANSCRIPT_ENRICH_LIMIT);
 
-    for topic in topics.iter().take(TRANSCRIPT_ENRICH_LIMIT) {
+    for (index, topic) in topics.iter().take(TRANSCRIPT_ENRICH_LIMIT).enumerate() {
+        report_scan_detail(
+            SOURCE_NAME,
+            format!("Transcript {}/{}", index + 1, enrich_count),
+        );
         let transcript_url = format!(
             "{}/history/topics/{}/transcript?limit=20",
             base_url.trim_end_matches('/'),
@@ -376,14 +396,18 @@ fn fetch_topic_model_map(
 
 fn topic_to_session(topic: &HistoryTopic, model: Option<&String>) -> Option<SessionRecord> {
     let created_at = topic
-        .created_at
+        .first_message_at
         .as_deref()
         .and_then(parse_rfc3339)
+        .or_else(|| topic.created_at.as_deref().and_then(parse_rfc3339))
+        .or_else(|| topic.last_message_at.as_deref().and_then(parse_rfc3339))
         .or_else(|| topic.updated_at.as_deref().and_then(parse_rfc3339))?;
     let updated_at = topic
-        .updated_at
+        .last_message_at
         .as_deref()
         .and_then(parse_rfc3339)
+        .or_else(|| topic.updated_at.as_deref().and_then(parse_rfc3339))
+        .or_else(|| topic.created_at.as_deref().and_then(parse_rfc3339))
         .unwrap_or(created_at);
 
     let title = topic
@@ -433,7 +457,33 @@ fn topic_to_session(topic: &HistoryTopic, model: Option<&String>) -> Option<Sess
     })
 }
 
+fn apply_backup_import(
+    sessions_by_id: &mut HashMap<String, SessionRecord>,
+    usage_events: &mut Vec<UsageEvent>,
+    import: &BackupImport,
+    history_ok: bool,
+) -> bool {
+    if history_ok {
+        return false;
+    }
+
+    report_scan_detail(SOURCE_NAME, "Parsing fallback backup".to_string());
+    usage_events.extend(import.usage_events.iter().cloned());
+
+    for session in &import.sessions {
+        let session_id = session.summary.id.clone();
+        if let Some(existing) = sessions_by_id.get_mut(&session_id) {
+            merge_session_record(existing, session.clone());
+        } else {
+            sessions_by_id.insert(session_id, session.clone());
+        }
+    }
+
+    true
+}
+
 fn collect_agent_sessions(db_path: &Path) -> Result<(Vec<SessionRecord>, Vec<UsageEvent>, u32)> {
+    report_scan_detail(SOURCE_NAME, "Scanning agent sessions".to_string());
     let connection = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {}", db_path.display()))?;
     let agent_count = connection
@@ -497,7 +547,7 @@ fn collect_agent_sessions(db_path: &Path) -> Result<(Vec<SessionRecord>, Vec<Usa
 
         for message_row in message_rows {
             let (role, content, metadata, created_at_text) = message_row?;
-            let timestamp = parse_rfc3339(&created_at_text).unwrap_or_else(Utc::now);
+            let timestamp = parse_rfc3339(&created_at_text);
             let content_value = serde_json::from_str::<Value>(&content).ok();
             let metadata_value = metadata
                 .as_deref()
@@ -531,21 +581,32 @@ fn collect_agent_sessions(db_path: &Path) -> Result<(Vec<SessionRecord>, Vec<Usa
                     .or_else(|| Some("unknown".into()));
             }
 
-            let total_tokens = content_value
+            let usage_metrics = content_value
                 .as_ref()
-                .and_then(extract_usage_total)
-                .or_else(|| metadata_value.as_ref().and_then(extract_usage_total))
+                .and_then(extract_usage_metrics)
+                .or_else(|| metadata_value.as_ref().and_then(extract_usage_metrics));
+            let total_tokens = usage_metrics
+                .as_ref()
+                .map(UsageMetrics::total_tokens)
                 .unwrap_or(0);
 
             if total_tokens > 0 {
                 accumulator.total_tokens += total_tokens;
-                usage_events.push(UsageEvent {
-                    source_id: SOURCE_ID,
-                    occurred_at: timestamp,
-                    total_tokens,
-                    calculation_method: CalculationMethod::Native,
-                    session_id: format!("agent:{session_id}"),
-                });
+                if let Some(timestamp) = timestamp {
+                    let usage_metrics = usage_metrics.unwrap_or_default();
+                    usage_events.push(UsageEvent {
+                        source_id: SOURCE_ID,
+                        occurred_at: timestamp,
+                        model: usage_metrics
+                            .model
+                            .or_else(|| accumulator.model.clone())
+                            .unwrap_or_else(|| "unknown".into()),
+                        token_breakdown: usage_metrics.token_breakdown,
+                        total_tokens,
+                        calculation_method: CalculationMethod::Native,
+                        session_id: format!("agent:{session_id}"),
+                    });
+                }
             }
 
             if role == "user" && accumulator.title.as_deref().unwrap_or_default().is_empty() {
@@ -727,7 +788,7 @@ fn backup_note(count: usize) -> String {
     if count == 0 {
         String::new()
     } else {
-        format!(" {count} Cherry backup zip(s) were also detected.")
+        format!("; {count} Cherry backup zip(s) were also detected")
     }
 }
 
@@ -822,6 +883,10 @@ fn import_legacy_backup_archive(path: &Path) -> Result<BackupImport> {
     let block_previews = extract_backup_block_previews(&data);
     let topic_values = extract_backup_table_values(&data, "topics");
     let archive_seen_at = format_mtime(path).ok();
+    let archive_modified_at = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map(DateTime::<Utc>::from)
+        .ok();
 
     let mut sessions = Vec::new();
     let mut usage_events = Vec::new();
@@ -833,6 +898,10 @@ fn import_legacy_backup_archive(path: &Path) -> Result<BackupImport> {
             usage_events.append(&mut events);
             sessions.push(session);
         }
+    }
+
+    if let Some(archive_modified_at) = archive_modified_at {
+        retain_plausible_backup_usage_events(&mut usage_events, archive_modified_at);
     }
 
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
@@ -1018,16 +1087,28 @@ fn backup_topic_to_session(
             accumulator.model = extract_model(&message).or_else(|| Some("unknown".into()));
         }
 
-        let total_tokens = extract_usage_total(&message).unwrap_or(0);
+        let usage_metrics = extract_usage_metrics(&message);
+        let total_tokens = usage_metrics
+            .as_ref()
+            .map(UsageMetrics::total_tokens)
+            .unwrap_or(0);
         if total_tokens > 0 {
             accumulator.total_tokens += total_tokens;
-            usage_events.push(UsageEvent {
-                source_id: SOURCE_ID,
-                occurred_at: timestamp.unwrap_or_else(Utc::now),
-                total_tokens,
-                calculation_method: CalculationMethod::Native,
-                session_id: topic_id.clone(),
-            });
+            if let Some(timestamp) = timestamp {
+                let usage_metrics = usage_metrics.unwrap_or_default();
+                usage_events.push(UsageEvent {
+                    source_id: SOURCE_ID,
+                    occurred_at: timestamp,
+                    model: usage_metrics
+                        .model
+                        .or_else(|| accumulator.model.clone())
+                        .unwrap_or_else(|| "unknown".into()),
+                    token_breakdown: usage_metrics.token_breakdown,
+                    total_tokens,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: topic_id.clone(),
+                });
+            }
         }
     }
 
@@ -1094,6 +1175,14 @@ fn extract_backup_message_preview(
 
 fn display_path(path: PathBuf) -> String {
     path.display().to_string()
+}
+
+fn retain_plausible_backup_usage_events(
+    usage_events: &mut Vec<UsageEvent>,
+    archive_modified_at: DateTime<Utc>,
+) {
+    let latest_plausible = archive_modified_at + chrono::Duration::hours(24);
+    usage_events.retain(|event| event.occurred_at <= latest_plausible);
 }
 
 fn format_mtime(path: &Path) -> Result<String> {
@@ -1178,7 +1267,7 @@ fn extract_model(value: &Value) -> Option<String> {
     }
 }
 
-fn extract_usage_total(value: &Value) -> Option<u64> {
+fn extract_usage_metrics(value: &Value) -> Option<UsageMetrics> {
     let usage = if let Some(message) = value.get("message") {
         message.get("usage").or_else(|| value.get("usage"))
     } else {
@@ -1186,41 +1275,60 @@ fn extract_usage_total(value: &Value) -> Option<u64> {
     };
 
     usage
-        .and_then(total_from_usage)
-        .or_else(|| value.get("totalUsage").and_then(total_from_usage))
-        .or_else(|| value.get("metrics").and_then(total_from_usage))
+        .and_then(usage_metrics_from_usage)
+        .or_else(|| value.get("totalUsage").and_then(usage_metrics_from_usage))
+        .or_else(|| value.get("metrics").and_then(usage_metrics_from_usage))
 }
 
-fn total_from_usage(value: &Value) -> Option<u64> {
+fn usage_metrics_from_usage(value: &Value) -> Option<UsageMetrics> {
     let direct_total = ["total_tokens", "totalTokens", "tokenCount"]
         .iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_u64));
+        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+        .unwrap_or(0);
+    let input_tokens = usage_value(value, &["input_tokens", "inputTokens"]);
+    let cache_creation_input_tokens =
+        usage_value(value, &["cache_creation_input_tokens", "cacheCreationInputTokens"]);
+    let cached_input_tokens = usage_value(
+        value,
+        &[
+            "cache_read_input_tokens",
+            "cacheReadInputTokens",
+            "cached_input_tokens",
+            "cachedInputTokens",
+        ],
+    );
+    let output_tokens = usage_value(value, &["output_tokens", "outputTokens"])
+        .saturating_add(usage_value(value, &["reasoning_tokens", "reasoningTokens"]))
+        .saturating_add(usage_value(
+            value,
+            &["reasoning_output_tokens", "reasoningOutputTokens"],
+        ));
 
-    if direct_total.is_some() {
-        return direct_total;
+    let classified_total = input_tokens
+        .saturating_add(cache_creation_input_tokens)
+        .saturating_add(cached_input_tokens)
+        .saturating_add(output_tokens);
+    let total_tokens = direct_total.max(classified_total);
+    if total_tokens == 0 {
+        return None;
     }
 
-    let mut total = 0;
-    for key in [
-        "input_tokens",
-        "inputTokens",
-        "output_tokens",
-        "outputTokens",
-        "cache_creation_input_tokens",
-        "cacheCreationInputTokens",
-        "cache_read_input_tokens",
-        "cacheReadInputTokens",
-        "reasoning_tokens",
-        "reasoningTokens",
-    ] {
-        total += value.get(key).and_then(Value::as_u64).unwrap_or(0);
-    }
+    Some(UsageMetrics {
+        model: extract_model(value),
+        token_breakdown: TokenBreakdown {
+            input_tokens,
+            cache_creation_input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            other_tokens: total_tokens.saturating_sub(classified_total),
+        },
+    })
+}
 
-    if total > 0 {
-        Some(total)
-    } else {
-        None
-    }
+fn usage_value(value: &Value, keys: &[&str]) -> u64 {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+        .unwrap_or(0)
 }
 
 fn normalize_text(text: &str) -> String {
@@ -1252,4 +1360,163 @@ fn looks_meta_command(text: &str) -> bool {
         || normalized.starts_with('{')
         || normalized.starts_with("debug")
         || normalized.starts_with("tool ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json::json;
+
+    #[test]
+    fn backup_topic_without_message_timestamp_skips_usage_event() {
+        let mut topic_meta = HashMap::new();
+        topic_meta.insert(
+            "topic-1".to_string(),
+            BackupTopicMeta {
+                created_at: Some(Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap()),
+                ..Default::default()
+            },
+        );
+
+        let topic = json!({
+            "id": "topic-1",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "usage": {
+                        "total_tokens": 42
+                    }
+                }
+            ]
+        });
+
+        let (session, events) =
+            backup_topic_to_session(&topic, &topic_meta, &HashMap::new()).expect("session");
+
+        assert_eq!(session.summary.total_tokens, 42);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn retain_plausible_backup_usage_events_discards_future_events() {
+        let archive_modified_at = Utc.with_ymd_and_hms(2026, 3, 19, 0, 11, 6).unwrap();
+        let mut events = vec![
+            UsageEvent {
+                source_id: SOURCE_ID,
+                occurred_at: Utc.with_ymd_and_hms(2026, 3, 18, 12, 0, 0).unwrap(),
+                model: "unknown".into(),
+                token_breakdown: TokenBreakdown {
+                    other_tokens: 10,
+                    ..TokenBreakdown::default()
+                },
+                total_tokens: 10,
+                calculation_method: CalculationMethod::Native,
+                session_id: "topic-a".into(),
+            },
+            UsageEvent {
+                source_id: SOURCE_ID,
+                occurred_at: Utc.with_ymd_and_hms(2026, 3, 23, 12, 0, 0).unwrap(),
+                model: "unknown".into(),
+                token_breakdown: TokenBreakdown {
+                    other_tokens: 20,
+                    ..TokenBreakdown::default()
+                },
+                total_tokens: 20,
+                calculation_method: CalculationMethod::Native,
+                session_id: "topic-b".into(),
+            },
+        ];
+
+        retain_plausible_backup_usage_events(&mut events, archive_modified_at);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id, "topic-a");
+    }
+
+    #[test]
+    fn topic_to_session_prefers_first_and_last_message_timestamps() {
+        let topic = HistoryTopic {
+            topic_id: "topic-1".into(),
+            topic_name: Some("Topic".into()),
+            assistant_name: Some("Assistant".into()),
+            created_at: Some("2026-03-23T16:00:00Z".into()),
+            updated_at: Some("2026-03-23T16:45:00Z".into()),
+            first_message_at: Some("2026-03-23T16:05:00Z".into()),
+            last_message_at: Some("2026-03-23T16:40:00Z".into()),
+            preview: Some("Preview".into()),
+        };
+
+        let session = topic_to_session(&topic, Some(&"gpt-5.4".to_string())).expect("session");
+
+        assert_eq!(session.summary.started_at, "Mar 23 12:05");
+        assert_eq!(
+            session.updated_at,
+            Utc.with_ymd_and_hms(2026, 3, 23, 16, 40, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn apply_backup_import_skips_backup_when_live_history_is_available() {
+        let import = BackupImport {
+            sessions: vec![SessionRecord {
+                updated_at: Utc.with_ymd_and_hms(2026, 3, 20, 12, 0, 0).unwrap(),
+                summary: SessionSummary {
+                    id: "backup-topic".into(),
+                    source_id: SOURCE_ID.into(),
+                    title: "Backup Topic".into(),
+                    preview: "Preview".into(),
+                    source: SOURCE_NAME.into(),
+                    workspace: "backup".into(),
+                    model: "unknown".into(),
+                    started_at: "Mar 20 08:00".into(),
+                    total_tokens: 123,
+                    cost_usd: 0.0,
+                    calculation_method: CalculationMethod::Native,
+                    status: "indexed".into(),
+                },
+            }],
+            usage_events: vec![UsageEvent {
+                source_id: SOURCE_ID,
+                occurred_at: Utc.with_ymd_and_hms(2026, 3, 20, 12, 0, 0).unwrap(),
+                model: "unknown".into(),
+                token_breakdown: TokenBreakdown {
+                    other_tokens: 123,
+                    ..TokenBreakdown::default()
+                },
+                total_tokens: 123,
+                calculation_method: CalculationMethod::Native,
+                session_id: "backup-topic".into(),
+            }],
+            topic_count: 1,
+            ..Default::default()
+        };
+        let mut sessions_by_id = HashMap::new();
+        let mut usage_events = Vec::new();
+
+        let applied = apply_backup_import(&mut sessions_by_id, &mut usage_events, &import, true);
+
+        assert!(!applied);
+        assert!(sessions_by_id.is_empty());
+        assert!(usage_events.is_empty());
+    }
+
+    #[test]
+    fn api_server_profile_parses_uppercase_base_url_field() {
+        let profile: ApiServerProfile = serde_json::from_value(json!({
+            "baseURL": "http://127.0.0.1:23333/v1",
+            "apiKey": "cs-sk-test",
+            "enabled": true,
+            "updatedAt": "2026-03-22T08:02:52.498Z"
+        }))
+        .expect("parse profile");
+
+        assert_eq!(
+            profile.base_url.as_deref(),
+            Some("http://127.0.0.1:23333/v1")
+        );
+        assert_eq!(profile.api_key.as_deref(), Some("cs-sk-test"));
+        assert_eq!(profile.enabled, Some(true));
+        assert_eq!(profile.updated_at.as_deref(), Some("2026-03-22T08:02:52.498Z"));
+    }
 }

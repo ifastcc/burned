@@ -31,6 +31,7 @@ pub struct DailyUsagePoint {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceUsage {
+    pub source_id: String,
     pub source: String,
     pub tokens: u64,
     pub cost_usd: f64,
@@ -94,4 +95,18 @@ pub struct DashboardSnapshot {
     pub sessions: Vec<SessionSummary>,
     pub session_groups: Vec<SessionGroup>,
     pub source_statuses: Vec<SourceStatus>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDetailSnapshot {
+    pub source_id: String,
+    pub source_name: String,
+    pub status: SourceStatus,
+    pub calculation_mix: String,
+    pub today_tokens: u64,
+    pub today_cost_usd: f64,
+    pub week: Vec<DailyUsagePoint>,
+    pub daily_history: Vec<DailyUsagePoint>,
+    pub sessions: Vec<SessionSummary>,
 }

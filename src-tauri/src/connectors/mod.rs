@@ -4,18 +4,34 @@ pub mod claude_code;
 pub mod codex;
 pub mod cursor;
 
+use std::sync::{Arc, Mutex, OnceLock};
+
 use chrono::{DateTime, Utc};
 
 use crate::models::{CalculationMethod, SessionSummary, SourceStatus};
+use crate::pricing::{estimate_cost_usd, TokenBreakdown};
 
+type ScanDetailHook = Arc<dyn Fn(String, String) + Send + Sync>;
+static SCAN_DETAIL_HOOK: OnceLock<Mutex<Option<ScanDetailHook>>> = OnceLock::new();
+
+#[derive(Clone)]
 pub struct UsageEvent {
     pub source_id: &'static str,
     pub occurred_at: DateTime<Utc>,
+    pub model: String,
+    pub token_breakdown: TokenBreakdown,
     pub total_tokens: u64,
     pub calculation_method: CalculationMethod,
     pub session_id: String,
 }
 
+impl UsageEvent {
+    pub fn estimated_cost_usd(&self) -> Option<f64> {
+        estimate_cost_usd(&self.model, self.token_breakdown)
+    }
+}
+
+#[derive(Clone)]
 pub struct SessionRecord {
     pub updated_at: DateTime<Utc>,
     pub summary: SessionSummary,
@@ -29,6 +45,22 @@ pub struct SourceReport {
 
 pub trait SourceConnector {
     fn collect(&self) -> SourceReport;
+}
+
+pub fn set_scan_detail_hook(hook: Option<ScanDetailHook>) {
+    let slot = SCAN_DETAIL_HOOK.get_or_init(|| Mutex::new(None));
+    *slot.lock().expect("scan detail hook mutex poisoned") = hook;
+}
+
+pub(crate) fn report_scan_detail(source: &'static str, detail: impl Into<String>) {
+    let detail = detail.into();
+    let hook = SCAN_DETAIL_HOOK
+        .get()
+        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
+
+    if let Some(hook) = hook {
+        hook(source.to_string(), detail);
+    }
 }
 
 pub fn collect_all() -> Vec<SourceReport> {

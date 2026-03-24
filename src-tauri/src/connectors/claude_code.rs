@@ -10,8 +10,11 @@ use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::connectors::{SessionRecord, SourceConnector, SourceReport, UsageEvent};
+use crate::connectors::{
+    report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
+};
 use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "claude_code";
 const SOURCE_NAME: &str = "Claude Code";
@@ -28,6 +31,7 @@ struct SessionAccumulator {
     total_tokens: u64,
     title: Option<String>,
     preview: Option<String>,
+    has_non_meta_user_message: bool,
 }
 
 impl SourceConnector for ClaudeCodeConnector {
@@ -71,7 +75,18 @@ fn collect_claude() -> Result<SourceReport> {
     let mut usage_events = Vec::new();
     let mut sessions = Vec::new();
 
-    for path in parse_targets {
+    let parse_target_total = parse_targets.len();
+    for (index, path) in parse_targets.into_iter().enumerate() {
+        if parse_target_total > 0
+            && (index == 0
+                || index + 1 == parse_target_total
+                || (index + 1) % 25 == 0)
+        {
+            report_scan_detail(
+                SOURCE_NAME,
+                format!("Project logs {}/{}", index + 1, parse_target_total),
+            );
+        }
         let report = parse_session_file(&path)?;
         usage_events.extend(report.usage_events);
         if let Some(session) = report.session {
@@ -198,6 +213,7 @@ fn parse_session_file(path: &Path) -> Result<ParsedSessionFile> {
             .and_then(Value::as_str)
             .unwrap_or_default();
         if entry_type == "user" && !content_text.is_empty() && !looks_meta_command(&content_text) {
+            accumulator.has_non_meta_user_message = true;
             if accumulator.title.is_none() {
                 accumulator.title = Some(truncate(&content_text, 72));
             }
@@ -266,12 +282,27 @@ fn parse_session_file(path: &Path) -> Result<ParsedSessionFile> {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
 
-            let total_tokens =
-                input_tokens + cache_creation_tokens + cache_read_tokens + output_tokens;
-            if total_tokens > 0 {
+            let token_breakdown = TokenBreakdown {
+                input_tokens,
+                cache_creation_input_tokens: cache_creation_tokens,
+                cached_input_tokens: cache_read_tokens,
+                output_tokens,
+                other_tokens: 0,
+            };
+            let total_tokens = token_breakdown.total_tokens();
+            if total_tokens > 0 && accumulator.has_non_meta_user_message {
+                let event_model = value
+                    .get("message")
+                    .and_then(|message| message.get("model"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| accumulator.model.clone());
                 usage_events.push(UsageEvent {
                     source_id: SOURCE_ID,
                     occurred_at: timestamp,
+                    model: event_model,
+                    token_breakdown,
                     total_tokens,
                     calculation_method: CalculationMethod::Native,
                     session_id: session_id.clone(),
@@ -293,6 +324,10 @@ fn parse_session_file(path: &Path) -> Result<ParsedSessionFile> {
 }
 
 fn to_session_record(session: SessionAccumulator) -> Option<SessionRecord> {
+    if !session.has_non_meta_user_message {
+        return None;
+    }
+
     let started_at = session.started_at?;
     let updated_at = session.updated_at.unwrap_or(started_at);
 
@@ -433,9 +468,14 @@ fn extract_message_text(value: &Value) -> String {
 }
 
 fn looks_meta_command(text: &str) -> bool {
-    text.contains("<local-command-caveat>")
-        || text.starts_with("<command-name>")
-        || text.starts_with("<local-command-stdout>")
+    let trimmed = text.trim();
+    let normalized = trimmed.to_ascii_lowercase();
+    trimmed.contains("<local-command-caveat>")
+        || trimmed.starts_with("<command-name>")
+        || trimmed.starts_with("<command-message>")
+        || trimmed.contains("<command-name>")
+        || trimmed.starts_with("<local-command-stdout>")
+        || normalized.starts_with("the user just ran /")
 }
 
 fn normalize_text(text: &str) -> String {
@@ -455,5 +495,60 @@ fn truncate(text: &str, max_chars: usize) -> String {
             .take(max_chars.saturating_sub(1))
             .collect::<String>();
         format!("{truncated}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_temp_session(contents: impl AsRef<[u8]>) -> Result<PathBuf> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("burned-claude-{unique}.jsonl"));
+        fs::write(&path, contents)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn parse_session_file_excludes_meta_command_only_sessions() -> Result<()> {
+        let path = write_temp_session(
+            r#"{"type":"user","timestamp":"2026-03-23T14:30:22.695Z","sessionId":"meta-session","cwd":"/Users/kbaicai","message":{"role":"user","content":"<command-message>insights</command-message>\n<command-name>/insights</command-name>"}}"#
+                .to_owned()
+                + "\n"
+                + r#"{"type":"user","timestamp":"2026-03-23T14:30:22.695Z","sessionId":"meta-session","cwd":"/Users/kbaicai","message":{"role":"user","content":"The user just ran /insights to generate a usage report."}}"#
+                + "\n"
+                + r#"{"type":"assistant","timestamp":"2026-03-23T14:30:27.587Z","sessionId":"meta-session","cwd":"/Users/kbaicai","message":{"role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"report ready"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":23579,"cache_read_input_tokens":10252,"output_tokens":2}}}"#,
+        )?;
+        let parsed = parse_session_file(&path)?;
+        let _ = fs::remove_file(&path);
+
+        assert!(parsed.usage_events.is_empty());
+        assert!(parsed.session.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_session_file_keeps_regular_user_sessions() -> Result<()> {
+        let path = write_temp_session(
+            r#"{"type":"user","timestamp":"2026-03-23T14:30:22.695Z","sessionId":"real-session","cwd":"/Users/kbaicai/project","message":{"role":"user","content":"帮我修一个 bug"}}"#
+                .to_owned()
+                + "\n"
+                + r#"{"type":"assistant","timestamp":"2026-03-23T14:30:27.587Z","sessionId":"real-session","cwd":"/Users/kbaicai/project","message":{"role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"好的"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":20,"output_tokens":5}}}"#,
+        )?;
+        let parsed = parse_session_file(&path)?;
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(parsed.usage_events.len(), 1);
+        assert_eq!(parsed.usage_events[0].total_tokens, 35);
+        assert_eq!(
+            parsed.session.expect("session").summary.title,
+            "帮我修一个 bug"
+        );
+        Ok(())
     }
 }

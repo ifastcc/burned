@@ -15,6 +15,45 @@ export function resolveBurnedBinaryPath(targetDir, platform = process.platform) 
   return path.join(targetDir, "release", fileName);
 }
 
+function latestModifiedMs(targetPath) {
+  if (!fs.existsSync(targetPath)) {
+    return 0;
+  }
+
+  const stat = fs.statSync(targetPath);
+  if (!stat.isDirectory()) {
+    return stat.mtimeMs;
+  }
+
+  return fs.readdirSync(targetPath).reduce((latest, entry) => {
+    return Math.max(latest, latestModifiedMs(path.join(targetPath, entry)));
+  }, stat.mtimeMs);
+}
+
+export function needsRustRebuild(binaryPath, watchedPaths) {
+  if (!fs.existsSync(binaryPath)) {
+    return true;
+  }
+
+  const binaryModifiedMs = fs.statSync(binaryPath).mtimeMs;
+  const latestSourceMs = watchedPaths.reduce((latest, watchedPath) => {
+    return Math.max(latest, latestModifiedMs(watchedPath));
+  }, 0);
+
+  return latestSourceMs > binaryModifiedMs;
+}
+
+function rustWatchPaths(rootDir) {
+  return [
+    path.join(rootDir, "src-tauri", "Cargo.toml"),
+    path.join(rootDir, "src-tauri", "Cargo.lock"),
+    path.join(rootDir, "src-tauri", "build.rs"),
+    path.join(rootDir, "src-tauri", "src"),
+    path.join(rootDir, "src-tauri", "capabilities"),
+    path.join(rootDir, "src-tauri", "tauri.conf.json")
+  ];
+}
+
 function spawnCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -51,7 +90,7 @@ async function ensureFrontendDist(rootDir) {
 
 async function ensureRustBinary(rootDir, targetDir) {
   const binaryPath = resolveBurnedBinaryPath(targetDir);
-  if (fs.existsSync(binaryPath)) {
+  if (!needsRustRebuild(binaryPath, rustWatchPaths(rootDir))) {
     return binaryPath;
   }
 

@@ -7,6 +7,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use tiny_http::{Header, Response, Server, StatusCode};
 
+#[derive(Default)]
+struct ScanProgressState {
+    completed: usize,
+    total: usize,
+    label: String,
+    detail: Option<String>,
+}
+
 fn main() {
     if let Err(error) = dispatch() {
         eprintln!("burned: {error:#}");
@@ -70,13 +78,47 @@ fn run_server() -> Result<()> {
 }
 
 fn scan_initial_snapshot() -> Result<String> {
-    let mut total_steps = 0usize;
-    let body = burned_lib::build_dashboard_snapshot_json_with_progress(|completed, total, label| {
-        total_steps = total;
-        print_progress_line(completed, total, label);
-    })
-    .context("serialize dashboard snapshot")?;
+    let progress_state = Arc::new(Mutex::new(ScanProgressState::default()));
+    burned_lib::set_scan_detail_hook(Some({
+        let progress_state = Arc::clone(&progress_state);
+        Arc::new(move |label: String, detail: String| {
+            let mut state = progress_state
+                .lock()
+                .expect("Burned scan progress mutex poisoned");
+            state.label = label;
+            state.detail = Some(detail);
+            if state.total > 0 {
+                print_progress_line(
+                    state.completed,
+                    state.total,
+                    &state.label,
+                    state.detail.as_deref(),
+                );
+            }
+        })
+    }));
 
+    let body = burned_lib::build_dashboard_snapshot_json_with_progress({
+        let progress_state = Arc::clone(&progress_state);
+        move |completed, total, label| {
+            let mut state = progress_state
+                .lock()
+                .expect("Burned scan progress mutex poisoned");
+            state.completed = completed;
+            state.total = total;
+            state.label = label.to_string();
+            state.detail = None;
+            print_progress_line(completed, total, label, None);
+        }
+    })
+    .context("serialize dashboard snapshot");
+    burned_lib::set_scan_detail_hook(None);
+    let body = body?;
+
+    let total_steps = progress_state
+        .lock()
+        .expect("Burned scan progress mutex poisoned")
+        .total;
     if total_steps > 0 {
         print_completion_line(total_steps, "Initial scan complete");
         println!();
@@ -137,6 +179,28 @@ fn handle_request(
             .with_status_code(StatusCode(200))
             .with_header(content_type_header("application/json; charset=utf-8"));
         request.respond(response).context("respond with snapshot")?;
+        return Ok(());
+    }
+
+    if let Some(source_id) = request_path.strip_prefix("/api/sources/") {
+        match burned_lib::build_source_snapshot_json(source_id) {
+            Ok(body) => {
+                let response = Response::from_string(body)
+                    .with_status_code(StatusCode(200))
+                    .with_header(content_type_header("application/json; charset=utf-8"));
+                request
+                    .respond(response)
+                    .context("respond with source snapshot")?;
+            }
+            Err(error) => {
+                let response = Response::from_string(error)
+                    .with_status_code(StatusCode(404))
+                    .with_header(content_type_header("text/plain; charset=utf-8"));
+                request
+                    .respond(response)
+                    .context("respond with missing source snapshot")?;
+            }
+        }
         return Ok(());
     }
 
@@ -277,9 +341,9 @@ fn content_type_header(value: &str) -> Header {
         .expect("valid content-type header for Burned")
 }
 
-fn print_progress_line(completed: usize, total: usize, label: &str) {
-    let line = render_progress_line(completed, total, label);
-    print!("\r{line:<80}");
+fn print_progress_line(completed: usize, total: usize, label: &str, detail: Option<&str>) {
+    let line = render_progress_line(completed, total, label, detail);
+    print!("\r{line:<120}");
     let _ = io::stdout().flush();
 }
 
@@ -289,9 +353,18 @@ fn print_completion_line(total: usize, label: &str) {
     let _ = io::stdout().flush();
 }
 
-fn render_progress_line(completed: usize, total: usize, label: &str) -> String {
+fn render_progress_line(
+    completed: usize,
+    total: usize,
+    label: &str,
+    detail: Option<&str>,
+) -> String {
     let bar = progress_bar(completed, total);
-    format!("{bar} {completed}/{total} Scanning {label}")
+    if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
+        format!("{bar} {completed}/{total} Scanning {label} - {detail}")
+    } else {
+        format!("{bar} {completed}/{total} Scanning {label}")
+    }
 }
 
 fn render_completion_line(total: usize, label: &str) -> String {
@@ -319,8 +392,16 @@ mod tests {
     #[test]
     fn render_progress_line_formats_a_readable_progress_bar() {
         assert_eq!(
-            render_progress_line(2, 5, "Claude Code"),
+            render_progress_line(2, 5, "Claude Code", None),
             "[####------] 2/5 Scanning Claude Code"
+        );
+    }
+
+    #[test]
+    fn render_progress_line_includes_detail_when_present() {
+        assert_eq!(
+            render_progress_line(2, 5, "Cherry Studio", Some("Transcript 4/8")),
+            "[####------] 2/5 Scanning Cherry Studio - Transcript 4/8"
         );
     }
 }

@@ -8,8 +8,11 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::connectors::{SessionRecord, SourceConnector, SourceReport, UsageEvent};
+use crate::connectors::{
+    report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
+};
 use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "codex";
 const SOURCE_NAME: &str = "Codex";
@@ -23,6 +26,26 @@ struct RawUsage {
     output_tokens: u64,
     reasoning_output_tokens: u64,
     total_tokens: u64,
+}
+
+impl RawUsage {
+    fn token_breakdown(&self) -> TokenBreakdown {
+        let output_tokens = self
+            .output_tokens
+            .saturating_add(self.reasoning_output_tokens);
+        let classified_tokens = self
+            .input_tokens
+            .saturating_add(self.cached_input_tokens)
+            .saturating_add(output_tokens);
+
+        TokenBreakdown {
+            input_tokens: self.input_tokens,
+            cache_creation_input_tokens: 0,
+            cached_input_tokens: self.cached_input_tokens,
+            output_tokens,
+            other_tokens: self.total_tokens.saturating_sub(classified_tokens),
+        }
+    }
 }
 
 impl SourceConnector for CodexConnector {
@@ -243,14 +266,24 @@ fn query_usage_events(log_dbs: &[PathBuf]) -> Result<Vec<UsageEvent>> {
 fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<Vec<UsageEvent>> {
     let cutoff = Utc::now() - chrono::Duration::days(180);
     let mut events = Vec::new();
-
-    for entry in WalkDir::new(sessions_root)
+    let session_files = WalkDir::new(sessions_root)
         .into_iter()
         .filter_map(std::result::Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
-    {
-        let path = entry.path();
+        .map(|entry| entry.into_path())
+        .collect::<Vec<_>>();
+    let total_files = session_files.len();
+
+    for (index, path) in session_files.iter().enumerate() {
+        if total_files > 0
+            && (index == 0 || index + 1 == total_files || (index + 1) % 50 == 0)
+        {
+            report_scan_detail(
+                SOURCE_NAME,
+                format!("Session files {}/{}", index + 1, total_files),
+            );
+        }
         let contents = fs::read_to_string(path)
             .with_context(|| format!("read Codex session file {}", path.display()))?;
         let fallback_session_id = path
@@ -275,7 +308,14 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
     let cached = extract_u64(body, "cached_token_count=").unwrap_or(0);
     let reasoning = extract_u64(body, "reasoning_token_count=").unwrap_or(0);
     let tool = extract_u64(body, "tool_token_count=").unwrap_or(0);
-    let total_tokens = input + output + cached + reasoning + tool;
+    let token_breakdown = TokenBreakdown {
+        input_tokens: input,
+        cache_creation_input_tokens: 0,
+        cached_input_tokens: cached,
+        output_tokens: output.saturating_add(reasoning),
+        other_tokens: tool,
+    };
+    let total_tokens = token_breakdown.total_tokens();
     if total_tokens == 0 {
         return None;
     }
@@ -289,6 +329,8 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
     Some(UsageEvent {
         source_id: SOURCE_ID,
         occurred_at,
+        model: "unknown".into(),
+        token_breakdown,
         total_tokens,
         calculation_method: CalculationMethod::Native,
         session_id,
@@ -298,6 +340,7 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
 fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<UsageEvent> {
     let mut events = Vec::new();
     let mut session_id = fallback_session_id.to_string();
+    let mut session_model = String::from("unknown");
     let mut previous_totals: Option<RawUsage> = None;
 
     for line in contents.lines() {
@@ -307,9 +350,10 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
         }
 
         let is_session_meta_line = trimmed.contains(r#""type":"session_meta""#);
+        let is_turn_context_line = trimmed.contains(r#""type":"turn_context""#);
         let is_token_count_line =
             trimmed.contains(r#""type":"event_msg""#) && trimmed.contains(r#""token_count""#);
-        if !is_session_meta_line && !is_token_count_line {
+        if !is_session_meta_line && !is_turn_context_line && !is_token_count_line {
             continue;
         }
 
@@ -326,6 +370,18 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
                 .filter(|value| !value.is_empty())
             {
                 session_id = meta_id.to_string();
+            }
+            continue;
+        }
+
+        if entry_type == "turn_context" {
+            if let Some(model) = value
+                .get("payload")
+                .and_then(|payload| payload.get("model"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                session_model = model.to_string();
             }
             continue;
         }
@@ -374,19 +430,18 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
             continue;
         };
 
-        if raw_usage.total_tokens == 0
-            && raw_usage.input_tokens == 0
-            && raw_usage.cached_input_tokens == 0
-            && raw_usage.output_tokens == 0
-            && raw_usage.reasoning_output_tokens == 0
-        {
+        let token_breakdown = raw_usage.token_breakdown();
+        let total_tokens = token_breakdown.total_tokens();
+        if total_tokens == 0 {
             continue;
         }
 
         events.push(UsageEvent {
             source_id: SOURCE_ID,
             occurred_at,
-            total_tokens: raw_usage.total_tokens,
+            model: session_model.clone(),
+            token_breakdown,
+            total_tokens,
             calculation_method: CalculationMethod::Native,
             session_id: session_id.clone(),
         });
@@ -414,7 +469,12 @@ fn normalize_raw_usage(value: &Value) -> Option<RawUsage> {
     let total_tokens = record
         .get("total_tokens")
         .and_then(number_from_value)
-        .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
+        .unwrap_or_else(|| {
+            input_tokens
+                .saturating_add(cached_input_tokens)
+                .saturating_add(output_tokens)
+                .saturating_add(reasoning_output_tokens)
+        });
 
     Some(RawUsage {
         input_tokens,
@@ -599,7 +659,7 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "thread-123");
-        assert_eq!(events[0].total_tokens, 1700);
+        assert_eq!(events[0].total_tokens, 1950);
         assert_eq!(
             events[0].occurred_at,
             DateTime::parse_from_rfc3339("2026-03-23T06:41:09.961Z")
@@ -617,8 +677,21 @@ mod tests {
         let events = parse_session_usage_events(contents, "fallback-id");
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].total_tokens, 1700);
+        assert_eq!(events[0].total_tokens, 1950);
         assert_eq!(events[1].session_id, "thread-456");
-        assert_eq!(events[1].total_tokens, 1100);
+        assert_eq!(events[1].total_tokens, 1270);
+    }
+
+    #[test]
+    fn captures_turn_context_model_for_session_usage_events() {
+        let contents = r#"{"timestamp":"2026-03-24T03:00:34.000Z","type":"session_meta","payload":{"id":"thread-789"}}
+{"timestamp":"2026-03-24T03:00:35.000Z","type":"turn_context","payload":{"model":"gpt-5.4"}}
+{"timestamp":"2026-03-24T03:01:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700}}}}"#;
+
+        let events = parse_session_usage_events(contents, "fallback-id");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].model, "gpt-5.4");
+        assert!(events[0].estimated_cost_usd().is_some());
     }
 }

@@ -32,16 +32,14 @@ struct RawUsage {
 
 impl RawUsage {
     fn token_breakdown(&self) -> TokenBreakdown {
-        let output_tokens = self
-            .output_tokens
-            .saturating_add(self.reasoning_output_tokens);
-        let classified_tokens = self
-            .input_tokens
+        let input_tokens = self.input_tokens.saturating_sub(self.cached_input_tokens);
+        let output_tokens = self.output_tokens;
+        let classified_tokens = input_tokens
             .saturating_add(self.cached_input_tokens)
             .saturating_add(output_tokens);
 
         TokenBreakdown {
-            input_tokens: self.input_tokens,
+            input_tokens,
             cache_creation_input_tokens: 0,
             cached_input_tokens: self.cached_input_tokens,
             output_tokens,
@@ -347,6 +345,7 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
     let mut session_id = fallback_session_id.to_string();
     let mut session_model = String::from("unknown");
     let mut previous_totals: Option<RawUsage> = None;
+    let mut saw_session_meta = false;
 
     for line in contents.lines() {
         let trimmed = line.trim();
@@ -371,13 +370,16 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
             .and_then(Value::as_str)
             .unwrap_or_default();
         if entry_type == "session_meta" {
-            if let Some(meta_id) = value
-                .get("payload")
-                .and_then(|payload| payload.get("id"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-            {
-                session_id = meta_id.to_string();
+            if !saw_session_meta {
+                if let Some(meta_id) = value
+                    .get("payload")
+                    .and_then(|payload| payload.get("id"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    session_id = meta_id.to_string();
+                }
+                saw_session_meta = true;
             }
             continue;
         }
@@ -677,7 +679,10 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "thread-123");
-        assert_eq!(events[0].total_tokens, 1950);
+        assert_eq!(events[0].total_tokens, 1700);
+        assert_eq!(events[0].token_breakdown.input_tokens, 1000);
+        assert_eq!(events[0].token_breakdown.cached_input_tokens, 200);
+        assert_eq!(events[0].token_breakdown.output_tokens, 500);
         assert_eq!(
             events[0].occurred_at,
             DateTime::parse_from_rfc3339("2026-03-23T06:41:09.961Z")
@@ -695,9 +700,9 @@ mod tests {
         let events = parse_session_usage_events(contents, "fallback-id");
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].total_tokens, 1950);
+        assert_eq!(events[0].total_tokens, 1700);
         assert_eq!(events[1].session_id, "thread-456");
-        assert_eq!(events[1].total_tokens, 1270);
+        assert_eq!(events[1].total_tokens, 1100);
     }
 
     #[test]
@@ -710,6 +715,20 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].model, "gpt-5.4");
-        assert!(events[0].estimated_cost_usd().is_some());
+        assert_eq!(events[0].estimated_cost_usd(), Some(0.010_05));
+    }
+
+    #[test]
+    fn keeps_child_session_id_when_rollout_embeds_parent_session_meta() {
+        let contents = r#"{"timestamp":"2026-03-24T10:29:02.817Z","type":"session_meta","payload":{"id":"child-thread","forked_from_id":"parent-thread","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-thread","depth":1}}}}}
+{"timestamp":"2026-03-24T10:29:02.818Z","type":"session_meta","payload":{"id":"parent-thread","source":"vscode"}}
+{"timestamp":"2026-03-24T10:29:02.819Z","type":"turn_context","payload":{"model":"gpt-5.4"}}
+{"timestamp":"2026-03-24T10:29:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}}}"#;
+
+        let events = parse_session_usage_events(contents, "fallback-id");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id, "child-thread");
+        assert_eq!(events[0].total_tokens, 150);
     }
 }

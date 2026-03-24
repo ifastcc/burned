@@ -388,6 +388,7 @@ fn count_active_sources_for_day(usage_events: &[&UsageEvent], day: chrono::Naive
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SessionPricingFact {
+    total_tokens: u64,
     cost_usd: f64,
     coverage: PricingCoverage,
 }
@@ -419,8 +420,14 @@ fn legacy_pricing_state(coverage: PricingCoverage) -> &'static str {
     }
 }
 
-fn session_pricing_fact(total_events: u32, priced_events: u32, cost_usd: f64) -> SessionPricingFact {
+fn session_pricing_fact(
+    total_events: u32,
+    priced_events: u32,
+    total_tokens: u64,
+    cost_usd: f64,
+) -> SessionPricingFact {
     SessionPricingFact {
+        total_tokens,
         cost_usd,
         coverage: derive_pricing_coverage(
             priced_events,
@@ -432,22 +439,26 @@ fn session_pricing_fact(total_events: u32, priced_events: u32, cost_usd: f64) ->
 fn collect_session_pricing_facts<'a>(
     events: impl IntoIterator<Item = &'a UsageEvent>,
 ) -> HashMap<String, SessionPricingFact> {
-    let mut facts = HashMap::<String, (u32, u32, f64)>::new();
+    let mut facts = HashMap::<String, (u32, u32, u64, f64)>::new();
     for event in events {
         let entry = facts
             .entry(session_cost_key(event.source_id, &event.session_id))
-            .or_insert((0, 0, 0.0));
+            .or_insert((0, 0, 0, 0.0));
         entry.0 += 1;
+        entry.2 += event.total_tokens;
         if let Some(cost_usd) = event_cost_usd(event) {
             entry.1 += 1;
-            entry.2 += cost_usd;
+            entry.3 += cost_usd;
         }
     }
 
     facts
         .into_iter()
-        .map(|(key, (total_events, priced_events, cost_usd))| {
-            (key, session_pricing_fact(total_events, priced_events, cost_usd))
+        .map(|(key, (total_events, priced_events, total_tokens, cost_usd))| {
+            (
+                key,
+                session_pricing_fact(total_events, priced_events, total_tokens, cost_usd),
+            )
         })
         .collect()
 }
@@ -601,6 +612,9 @@ fn attach_session_cost(
 ) -> SessionSummary {
     let mut summary = summary.clone();
     if let Some(fact) = session_costs.get(&session_cost_key(&summary.source_id, &summary.id)) {
+        if fact.total_tokens > 0 {
+            summary.total_tokens = fact.total_tokens;
+        }
         summary.cost_usd = fact.cost_usd;
         summary.priced_sessions = u32::from(fact.coverage == PricingCoverage::Actual);
         summary.pending_pricing_sessions = u32::from(fact.coverage != PricingCoverage::Actual);
@@ -1139,6 +1153,7 @@ mod tests {
         let session_costs = HashMap::from([(
             session_cost_key("codex", "session-mixed"),
             SessionPricingFact {
+                total_tokens: 3_750,
                 cost_usd: 0.006_375,
                 coverage: models::PricingCoverage::Partial,
             },
@@ -1151,6 +1166,41 @@ mod tests {
         assert_eq!(attached.pending_pricing_sessions, 1);
         assert_eq!(attached.pricing_coverage, models::PricingCoverage::Partial);
         assert_eq!(attached.pricing_state, "pending");
+    }
+
+    #[test]
+    fn attach_session_cost_uses_event_sourced_tokens_when_available() {
+        let summary = SessionSummary {
+            id: "session-priced".into(),
+            source_id: "codex".into(),
+            title: "Session".into(),
+            preview: "Preview".into(),
+            source: "Codex".into(),
+            workspace: "burned".into(),
+            model: "gpt-5.4".into(),
+            started_at: "Mar 24 12:00".into(),
+            total_tokens: 31_351_672,
+            cost_usd: 0.0,
+            priced_sessions: 0,
+            pending_pricing_sessions: 0,
+            pricing_coverage: models::PricingCoverage::Pending,
+            pricing_state: "pending".into(),
+            calculation_method: CalculationMethod::Native,
+            status: "indexed".into(),
+        };
+        let session_costs = HashMap::from([(
+            session_cost_key("codex", "session-priced"),
+            SessionPricingFact {
+                total_tokens: 72_033_066,
+                cost_usd: 104.277_195_5,
+                coverage: models::PricingCoverage::Partial,
+            },
+        )]);
+
+        let attached = attach_session_cost(&summary, &session_costs);
+
+        assert_eq!(attached.total_tokens, 72_033_066);
+        approx_eq(attached.cost_usd, 104.277_195_5);
     }
 
     #[test]

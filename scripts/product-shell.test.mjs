@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { showcaseCopy } from "../src/showcase-copy.mjs";
+import { appCopy } from "../src/app-copy.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = path.join(dirname, "..", "package.json");
@@ -15,7 +15,7 @@ const appSource = fs.readFileSync(appPath, "utf8");
 const schemaSource = fs.readFileSync(schemaPath, "utf8");
 
 test("zh-CN hero copy leads with a punchier today-focused question", () => {
-  assert.equal(showcaseCopy["zh-CN"].tagline, "你今天已经烧掉多少 token？");
+  assert.equal(appCopy["zh-CN"].tagline, "你今天已经烧掉多少 token？");
 });
 
 test("package.json exposes a real app startup flow without replacing pnpm dev", () => {

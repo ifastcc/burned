@@ -412,6 +412,46 @@ fn derive_pricing_coverage(priced: u32, pending: u32) -> PricingCoverage {
     }
 }
 
+fn legacy_pricing_state(coverage: PricingCoverage) -> &'static str {
+    match coverage {
+        PricingCoverage::Actual => "actual",
+        PricingCoverage::Partial | PricingCoverage::Pending => "pending",
+    }
+}
+
+fn session_pricing_fact(total_events: u32, priced_events: u32, cost_usd: f64) -> SessionPricingFact {
+    SessionPricingFact {
+        cost_usd,
+        coverage: derive_pricing_coverage(
+            priced_events,
+            total_events.saturating_sub(priced_events),
+        ),
+    }
+}
+
+fn collect_session_pricing_facts<'a>(
+    events: impl IntoIterator<Item = &'a UsageEvent>,
+) -> HashMap<String, SessionPricingFact> {
+    let mut facts = HashMap::<String, (u32, u32, f64)>::new();
+    for event in events {
+        let entry = facts
+            .entry(session_cost_key(event.source_id, &event.session_id))
+            .or_insert((0, 0, 0.0));
+        entry.0 += 1;
+        if let Some(cost_usd) = event_cost_usd(event) {
+            entry.1 += 1;
+            entry.2 += cost_usd;
+        }
+    }
+
+    facts
+        .into_iter()
+        .map(|(key, (total_events, priced_events, cost_usd))| {
+            (key, session_pricing_fact(total_events, priced_events, cost_usd))
+        })
+        .collect()
+}
+
 fn summarize_window(events: &[&UsageEvent], days: &[NaiveDate]) -> UsageWindowSummary {
     if days.is_empty() {
         return UsageWindowSummary::default();
@@ -552,32 +592,7 @@ fn periodic_breakdown_row(
 }
 
 fn build_session_pricing_facts(reports: &[SourceReport]) -> HashMap<String, SessionPricingFact> {
-    let mut facts = HashMap::<String, (u32, u32, f64)>::new();
-    for report in reports {
-        for event in &report.usage_events {
-            let entry = facts
-                .entry(session_cost_key(event.source_id, &event.session_id))
-                .or_insert((0, 0, 0.0));
-            entry.0 += 1;
-            if let Some(cost_usd) = event_cost_usd(event) {
-                entry.1 += 1;
-                entry.2 += cost_usd;
-            }
-        }
-    }
-    facts
-        .into_iter()
-        .map(|(key, (total_events, priced_events, cost_usd))| {
-            let coverage = if priced_events == 0 {
-                PricingCoverage::Pending
-            } else if priced_events == total_events {
-                PricingCoverage::Actual
-            } else {
-                PricingCoverage::Partial
-            };
-            (key, SessionPricingFact { cost_usd, coverage })
-        })
-        .collect()
+    collect_session_pricing_facts(reports.iter().flat_map(|report| report.usage_events.iter()))
 }
 
 fn attach_session_cost(
@@ -590,17 +605,13 @@ fn attach_session_cost(
         summary.priced_sessions = u32::from(fact.coverage == PricingCoverage::Actual);
         summary.pending_pricing_sessions = u32::from(fact.coverage != PricingCoverage::Actual);
         summary.pricing_coverage = fact.coverage;
-        summary.pricing_state = if matches!(fact.coverage, PricingCoverage::Pending) {
-            "pending".into()
-        } else {
-            "actual".into()
-        };
+        summary.pricing_state = legacy_pricing_state(fact.coverage).into();
     } else {
         summary.cost_usd = 0.0;
         summary.priced_sessions = 0;
         summary.pending_pricing_sessions = 1;
         summary.pricing_coverage = PricingCoverage::Pending;
-        summary.pricing_state = "pending".into();
+        summary.pricing_state = legacy_pricing_state(PricingCoverage::Pending).into();
     }
     summary
 }
@@ -622,31 +633,7 @@ fn filter_events_for_days<'a>(
 }
 
 fn session_pricing_facts(events: &[&UsageEvent]) -> HashMap<String, SessionPricingFact> {
-    let mut facts = HashMap::<String, (u32, u32, f64)>::new();
-    for event in events {
-        let entry = facts
-            .entry(session_cost_key(event.source_id, &event.session_id))
-            .or_insert((0, 0, 0.0));
-        entry.0 += 1;
-        if let Some(cost_usd) = event_cost_usd(event) {
-            entry.1 += 1;
-            entry.2 += cost_usd;
-        }
-    }
-
-    facts
-        .into_iter()
-        .map(|(key, (total_events, priced_events, cost_usd))| {
-            let coverage = if priced_events == 0 {
-                PricingCoverage::Pending
-            } else if priced_events == total_events {
-                PricingCoverage::Actual
-            } else {
-                PricingCoverage::Partial
-            };
-            (key, SessionPricingFact { cost_usd, coverage })
-        })
-        .collect()
+    collect_session_pricing_facts(events.iter().copied())
 }
 
 fn peak_usage_point(events: &[&UsageEvent], days: &[NaiveDate]) -> Option<PeakUsagePoint> {
@@ -1127,6 +1114,43 @@ mod tests {
             models::PricingCoverage::Partial
         );
         assert!(snapshot.today_summary.pending_pricing_sessions > 0);
+    }
+
+    #[test]
+    fn attach_session_cost_keeps_legacy_pricing_state_pending_for_partial_coverage() {
+        let summary = SessionSummary {
+            id: "session-mixed".into(),
+            source_id: "codex".into(),
+            title: "Session".into(),
+            preview: "Preview".into(),
+            source: "Codex".into(),
+            workspace: "burned".into(),
+            model: "gpt-5.4".into(),
+            started_at: "Mar 24 12:00".into(),
+            total_tokens: 3_750,
+            cost_usd: 0.0,
+            priced_sessions: 0,
+            pending_pricing_sessions: 0,
+            pricing_coverage: models::PricingCoverage::Pending,
+            pricing_state: "pending".into(),
+            calculation_method: CalculationMethod::Native,
+            status: "indexed".into(),
+        };
+        let session_costs = HashMap::from([(
+            session_cost_key("codex", "session-mixed"),
+            SessionPricingFact {
+                cost_usd: 0.006_375,
+                coverage: models::PricingCoverage::Partial,
+            },
+        )]);
+
+        let attached = attach_session_cost(&summary, &session_costs);
+
+        approx_eq(attached.cost_usd, 0.006_375);
+        assert_eq!(attached.priced_sessions, 0);
+        assert_eq!(attached.pending_pricing_sessions, 1);
+        assert_eq!(attached.pricing_coverage, models::PricingCoverage::Partial);
+        assert_eq!(attached.pricing_state, "pending");
     }
 
     #[test]

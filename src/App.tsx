@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 import { createEmptyDashboardSnapshot } from "./data/empty-dashboard";
-import { resolveSelectedDateAfterRefresh, toLocalIsoDate } from "./date-utils.mjs";
+import { resolveSelectedDateAfterRefresh, toIsoDateInTimeZone } from "./date-utils.mjs";
 import { showcaseCopy } from "./showcase-copy.mjs";
 import type {
   DailyUsagePoint,
@@ -65,13 +65,22 @@ declare global {
   }
 }
 
+function getResolvedTimeZone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
 async function getDashboardSnapshot() {
+  const timeZone = getResolvedTimeZone();
+
   if (window.__TAURI_INTERNALS__) {
-    return invoke<DashboardSnapshot>("get_dashboard_snapshot");
+    return invoke<DashboardSnapshot>("get_dashboard_snapshot", { timeZone });
   }
 
   const response = await fetch("/api/snapshot", {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "X-Burned-Time-Zone": timeZone,
+    },
   });
   if (!response.ok) {
     throw new Error(`Snapshot request failed with ${response.status}`);
@@ -81,12 +90,17 @@ async function getDashboardSnapshot() {
 }
 
 function getSourceSnapshot(sourceId: string) {
+  const timeZone = getResolvedTimeZone();
+
   if (window.__TAURI_INTERNALS__) {
-    return invoke<SourceDetailSnapshot>("get_source_snapshot", { sourceId });
+    return invoke<SourceDetailSnapshot>("get_source_snapshot", { sourceId, timeZone });
   }
 
   return fetch(`/api/sources/${encodeURIComponent(sourceId)}`, {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "X-Burned-Time-Zone": timeZone,
+    },
   }).then(async (response) => {
     if (!response.ok) {
       throw new Error(`Source snapshot request failed with ${response.status}`);
@@ -354,7 +368,7 @@ function FlameChart({
   onSelectDate: (date: string) => void;
 }) {
   const maxTokens = Math.max(...data.map((d) => d.totalTokens), 1);
-  const todayStr = toLocalIsoDate();
+  const todayStr = toIsoDateInTimeZone(new Date(), getResolvedTimeZone());
   const loc = locale === "zh-CN" ? "zh-CN" : "en-US";
 
   return (

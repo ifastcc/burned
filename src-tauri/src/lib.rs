@@ -6,7 +6,8 @@ mod settings;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{Duration, Local, Timelike};
+use chrono::{DateTime, Duration, Local, NaiveDate, Timelike, Utc};
+use chrono_tz::Tz;
 use serde_json::Result as JsonResult;
 
 use connectors::{collect_all, collect_all_with_progress, SourceReport};
@@ -18,13 +19,16 @@ use models::{
 pub use settings::AppSettings;
 
 #[tauri::command]
-fn get_dashboard_snapshot() -> DashboardSnapshot {
-    build_dashboard_snapshot()
+fn get_dashboard_snapshot(time_zone: Option<String>) -> DashboardSnapshot {
+    build_dashboard_snapshot(time_zone.as_deref())
 }
 
 #[tauri::command]
-fn get_source_snapshot(source_id: String) -> Result<SourceDetailSnapshot, String> {
-    build_source_snapshot(&source_id)
+fn get_source_snapshot(
+    source_id: String,
+    time_zone: Option<String>,
+) -> Result<SourceDetailSnapshot, String> {
+    build_source_snapshot(&source_id, time_zone.as_deref())
 }
 
 #[tauri::command]
@@ -42,31 +46,92 @@ fn clear_cherry_backup_dir() -> Result<AppSettings, String> {
     settings::clear_cherry_backup_dir().map_err(|error| error.to_string())
 }
 
-pub fn build_dashboard_snapshot() -> DashboardSnapshot {
-    let now = Local::now();
-    let reports = collect_all();
-    build_dashboard_snapshot_from_reports(reports, now)
+#[derive(Clone, Copy, Debug)]
+enum SnapshotTimeZone {
+    Named(Tz),
+    SystemLocal,
 }
 
-pub fn build_source_snapshot(source_id: &str) -> Result<SourceDetailSnapshot, String> {
-    let now = Local::now();
+impl SnapshotTimeZone {
+    fn resolve(requested_time_zone: Option<&str>) -> Self {
+        requested_time_zone
+            .and_then(|value| value.parse::<Tz>().ok())
+            .map(Self::Named)
+            .unwrap_or(Self::SystemLocal)
+    }
+
+    fn today(self, now: DateTime<Utc>) -> NaiveDate {
+        match self {
+            SnapshotTimeZone::Named(time_zone) => now.with_timezone(&time_zone).date_naive(),
+            SnapshotTimeZone::SystemLocal => now.with_timezone(&Local).date_naive(),
+        }
+    }
+
+    fn local_day(self, at: DateTime<Utc>) -> NaiveDate {
+        match self {
+            SnapshotTimeZone::Named(time_zone) => at.with_timezone(&time_zone).date_naive(),
+            SnapshotTimeZone::SystemLocal => at.with_timezone(&Local).date_naive(),
+        }
+    }
+
+    fn headline_date(self, now: DateTime<Utc>) -> String {
+        match self {
+            SnapshotTimeZone::Named(time_zone) => now.with_timezone(&time_zone).format("%B %-d, %Y").to_string(),
+            SnapshotTimeZone::SystemLocal => now.with_timezone(&Local).format("%B %-d, %Y").to_string(),
+        }
+    }
+
+    fn elapsed_hours(self, now: DateTime<Utc>) -> f64 {
+        let (hour, minute) = match self {
+            SnapshotTimeZone::Named(time_zone) => {
+                let local = now.with_timezone(&time_zone);
+                (local.hour(), local.minute())
+            }
+            SnapshotTimeZone::SystemLocal => {
+                let local = now.with_timezone(&Local);
+                (local.hour(), local.minute())
+            }
+        };
+
+        ((hour as f64) + (minute as f64 / 60.0)).max(1.0)
+    }
+}
+
+pub fn build_dashboard_snapshot(time_zone: Option<&str>) -> DashboardSnapshot {
+    let now = Utc::now();
+    let snapshot_time_zone = SnapshotTimeZone::resolve(time_zone);
     let reports = collect_all();
-    build_source_snapshot_from_reports(&reports, now, source_id)
+    build_dashboard_snapshot_from_reports(reports, now, snapshot_time_zone)
+}
+
+pub fn build_source_snapshot(
+    source_id: &str,
+    time_zone: Option<&str>,
+) -> Result<SourceDetailSnapshot, String> {
+    let now = Utc::now();
+    let snapshot_time_zone = SnapshotTimeZone::resolve(time_zone);
+    let reports = collect_all();
+    build_source_snapshot_from_reports(&reports, now, snapshot_time_zone, source_id)
         .ok_or_else(|| format!("Source `{source_id}` was not found"))
 }
 
-pub fn build_dashboard_snapshot_with_progress<F>(on_progress: F) -> DashboardSnapshot
+pub fn build_dashboard_snapshot_with_progress<F>(
+    on_progress: F,
+    time_zone: Option<&str>,
+) -> DashboardSnapshot
 where
     F: FnMut(usize, usize, &str),
 {
-    let now = Local::now();
+    let now = Utc::now();
+    let snapshot_time_zone = SnapshotTimeZone::resolve(time_zone);
     let reports = collect_all_with_progress(on_progress);
-    build_dashboard_snapshot_from_reports(reports, now)
+    build_dashboard_snapshot_from_reports(reports, now, snapshot_time_zone)
 }
 
 fn build_dashboard_snapshot_from_reports(
     reports: Vec<SourceReport>,
-    now: chrono::DateTime<Local>,
+    now: DateTime<Utc>,
+    snapshot_time_zone: SnapshotTimeZone,
 ) -> DashboardSnapshot {
     let source_statuses = reports
         .iter()
@@ -87,22 +152,23 @@ fn build_dashboard_snapshot_from_reports(
         .iter()
         .flat_map(|report| report.usage_events.iter())
         .collect::<Vec<_>>();
+    let today = snapshot_time_zone.today(now);
 
     let total_tokens_today = usage_events
         .iter()
-        .filter(|event| event.occurred_at.with_timezone(&Local).date_naive() == now.date_naive())
+        .filter(|event| snapshot_time_zone.local_day(event.occurred_at) == today)
         .map(|event| event.total_tokens)
         .sum::<u64>();
     let total_cost_today = usage_events
         .iter()
-        .filter(|event| event.occurred_at.with_timezone(&Local).date_naive() == now.date_naive())
+        .filter(|event| snapshot_time_zone.local_day(event.occurred_at) == today)
         .map(|event| event.estimated_cost_usd().unwrap_or(0.0))
         .sum::<f64>();
 
     let total_native_today = usage_events
         .iter()
         .filter(|event| {
-            event.occurred_at.with_timezone(&Local).date_naive() == now.date_naive()
+            snapshot_time_zone.local_day(event.occurred_at) == today
                 && event.calculation_method == CalculationMethod::Native
         })
         .map(|event| event.total_tokens)
@@ -116,22 +182,22 @@ fn build_dashboard_snapshot_from_reports(
 
     let active_sources = usage_events
         .iter()
-        .filter(|event| event.occurred_at.with_timezone(&Local).date_naive() == now.date_naive())
+        .filter(|event| snapshot_time_zone.local_day(event.occurred_at) == today)
         .map(|event| event.source_id)
         .collect::<HashSet<_>>()
         .len() as u16;
 
-    let elapsed_hours = ((now.hour() as f64) + (now.minute() as f64 / 60.0)).max(1.0);
+    let elapsed_hours = snapshot_time_zone.elapsed_hours(now);
     let burn_rate_per_hour = (total_tokens_today as f64 / elapsed_hours).round() as u64;
 
-    let week = build_weekly_usage(&usage_events, now);
-    let daily_history = build_daily_history(&usage_events, now, 180);
-    let sources = build_source_usage(&reports, &source_names, now);
+    let week = build_weekly_usage(&usage_events, now, snapshot_time_zone);
+    let daily_history = build_daily_history(&usage_events, now, 180, snapshot_time_zone);
+    let sources = build_source_usage(&reports, &source_names, now, snapshot_time_zone);
     let sessions = build_recent_sessions(&reports);
     let session_groups = build_session_groups(&reports);
 
     DashboardSnapshot {
-        headline_date: now.format("%B %-d, %Y").to_string(),
+        headline_date: snapshot_time_zone.headline_date(now),
         total_tokens_today,
         total_cost_today,
         exact_share,
@@ -149,15 +215,16 @@ fn build_dashboard_snapshot_from_reports(
 
 fn build_source_snapshot_from_reports(
     reports: &[SourceReport],
-    now: chrono::DateTime<Local>,
+    now: DateTime<Utc>,
+    snapshot_time_zone: SnapshotTimeZone,
     source_id: &str,
 ) -> Option<SourceDetailSnapshot> {
     let report = reports.iter().find(|report| report.status.id == source_id)?;
     let usage_events = report.usage_events.iter().collect::<Vec<_>>();
-    let week = build_weekly_usage(&usage_events, now);
-    let daily_history = build_daily_history(&usage_events, now, 30);
+    let week = build_weekly_usage(&usage_events, now, snapshot_time_zone);
+    let daily_history = build_daily_history(&usage_events, now, 30, snapshot_time_zone);
     let today = week.last().cloned().unwrap_or(DailyUsagePoint {
-        date: now.date_naive().format("%Y-%m-%d").to_string(),
+        date: snapshot_time_zone.today(now).format("%Y-%m-%d").to_string(),
         total_tokens: 0,
         total_cost_usd: 0.0,
         exact_share: 0.0,
@@ -184,20 +251,26 @@ fn build_source_snapshot_from_reports(
     })
 }
 
-pub fn build_dashboard_snapshot_json() -> JsonResult<String> {
-    serde_json::to_string(&build_dashboard_snapshot())
+pub fn build_dashboard_snapshot_json(time_zone: Option<&str>) -> JsonResult<String> {
+    serde_json::to_string(&build_dashboard_snapshot(time_zone))
 }
 
-pub fn build_source_snapshot_json(source_id: &str) -> Result<String, String> {
-    build_source_snapshot(source_id)
+pub fn build_source_snapshot_json(
+    source_id: &str,
+    time_zone: Option<&str>,
+) -> Result<String, String> {
+    build_source_snapshot(source_id, time_zone)
         .and_then(|snapshot| serde_json::to_string(&snapshot).map_err(|error| error.to_string()))
 }
 
-pub fn build_dashboard_snapshot_json_with_progress<F>(on_progress: F) -> JsonResult<String>
+pub fn build_dashboard_snapshot_json_with_progress<F>(
+    on_progress: F,
+    time_zone: Option<&str>,
+) -> JsonResult<String>
 where
     F: FnMut(usize, usize, &str),
 {
-    serde_json::to_string(&build_dashboard_snapshot_with_progress(on_progress))
+    serde_json::to_string(&build_dashboard_snapshot_with_progress(on_progress, time_zone))
 }
 
 pub fn set_scan_detail_hook(
@@ -224,28 +297,33 @@ pub fn reset_cherry_backup_dir() -> Result<AppSettings, String> {
 
 fn build_weekly_usage(
     usage_events: &[&connectors::UsageEvent],
-    now: chrono::DateTime<Local>,
+    now: DateTime<Utc>,
+    snapshot_time_zone: SnapshotTimeZone,
 ) -> Vec<DailyUsagePoint> {
-    build_usage_window(usage_events, now, 7)
+    build_usage_window(usage_events, now, 7, snapshot_time_zone)
 }
 
 fn build_daily_history(
     usage_events: &[&connectors::UsageEvent],
-    now: chrono::DateTime<Local>,
+    now: DateTime<Utc>,
     day_count: usize,
+    snapshot_time_zone: SnapshotTimeZone,
 ) -> Vec<DailyUsagePoint> {
-    build_usage_window(usage_events, now, day_count)
+    build_usage_window(usage_events, now, day_count, snapshot_time_zone)
 }
 
 fn build_usage_window(
     usage_events: &[&connectors::UsageEvent],
-    now: chrono::DateTime<Local>,
+    now: DateTime<Utc>,
     day_count: usize,
+    snapshot_time_zone: SnapshotTimeZone,
 ) -> Vec<DailyUsagePoint> {
     let mut totals = HashMap::<String, (u64, u64, f64)>::new();
     for event in usage_events {
-        let local_time = event.occurred_at.with_timezone(&Local);
-        let key = local_time.date_naive().format("%Y-%m-%d").to_string();
+        let key = snapshot_time_zone
+            .local_day(event.occurred_at)
+            .format("%Y-%m-%d")
+            .to_string();
         let entry = totals.entry(key).or_insert((0, 0, 0.0));
         entry.0 += event.total_tokens;
         if event.calculation_method == CalculationMethod::Native {
@@ -255,7 +333,7 @@ fn build_usage_window(
     }
 
     (0..day_count)
-        .map(|offset| now.date_naive() - Duration::days((day_count - 1 - offset) as i64))
+        .map(|offset| snapshot_time_zone.today(now) - Duration::days((day_count - 1 - offset) as i64))
         .map(|day| {
             let key = day.format("%Y-%m-%d").to_string();
             let (total_tokens, exact_tokens, total_cost_usd) =
@@ -271,8 +349,8 @@ fn build_usage_window(
                 total_tokens,
                 total_cost_usd,
                 exact_share,
-                active_sources: count_active_sources_for_day(usage_events, day),
-                session_count: count_sessions_for_day(usage_events, day),
+                active_sources: count_active_sources_for_day(usage_events, day, snapshot_time_zone),
+                session_count: count_sessions_for_day(usage_events, day, snapshot_time_zone),
             }
         })
         .collect()
@@ -281,16 +359,17 @@ fn build_usage_window(
 fn build_source_usage(
     reports: &[SourceReport],
     source_names: &HashMap<String, String>,
-    now: chrono::DateTime<Local>,
+    now: DateTime<Utc>,
+    snapshot_time_zone: SnapshotTimeZone,
 ) -> Vec<SourceUsage> {
-    let today = now.date_naive();
+    let today = snapshot_time_zone.today(now);
     let yesterday = today - Duration::days(1);
     let mut usage_by_source =
         HashMap::<String, (u64, u64, f64, HashSet<String>, HashSet<String>)>::new();
 
     for report in reports {
         for event in &report.usage_events {
-            let local_day = event.occurred_at.with_timezone(&Local).date_naive();
+            let local_day = snapshot_time_zone.local_day(event.occurred_at);
             let entry = usage_by_source
                 .entry(event.source_id.to_string())
                 .or_insert((0, 0, 0.0, HashSet::new(), HashSet::new()));
@@ -380,19 +459,24 @@ fn build_session_groups(reports: &[SourceReport]) -> Vec<SessionGroup> {
 fn count_active_sources_for_day(
     usage_events: &[&connectors::UsageEvent],
     day: chrono::NaiveDate,
+    snapshot_time_zone: SnapshotTimeZone,
 ) -> u16 {
     usage_events
         .iter()
-        .filter(|event| event.occurred_at.with_timezone(&Local).date_naive() == day)
+        .filter(|event| snapshot_time_zone.local_day(event.occurred_at) == day)
         .map(|event| event.source_id)
         .collect::<HashSet<_>>()
         .len() as u16
 }
 
-fn count_sessions_for_day(usage_events: &[&connectors::UsageEvent], day: chrono::NaiveDate) -> u32 {
+fn count_sessions_for_day(
+    usage_events: &[&connectors::UsageEvent],
+    day: chrono::NaiveDate,
+    snapshot_time_zone: SnapshotTimeZone,
+) -> u32 {
     usage_events
         .iter()
-        .filter(|event| event.occurred_at.with_timezone(&Local).date_naive() == day)
+        .filter(|event| snapshot_time_zone.local_day(event.occurred_at) == day)
         .map(|event| event.session_id.clone())
         .collect::<HashSet<_>>()
         .len() as u32
@@ -473,7 +557,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+    use chrono::TimeZone;
 
     use crate::connectors::{SessionRecord, SourceReport, UsageEvent};
     use crate::models::{SourceState, SourceStatus};
@@ -481,11 +565,11 @@ mod tests {
 
     #[test]
     fn dashboard_snapshot_rolls_up_estimated_costs_across_views() {
-        let now = Local
-            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 24, 16, 0, 0)
             .single()
-            .expect("local datetime");
-        let occurred_at = now.with_timezone(&Utc);
+            .expect("utc datetime");
+        let occurred_at = now;
         let expected_cost = 0.006_375;
         let report = SourceReport {
             status: ready_status("codex", "Codex"),
@@ -522,7 +606,11 @@ mod tests {
             }],
         };
 
-        let snapshot = build_dashboard_snapshot_from_reports(vec![report], now);
+        let snapshot = build_dashboard_snapshot_from_reports(
+            vec![report],
+            now,
+            SnapshotTimeZone::Named("Asia/Shanghai".parse::<Tz>().expect("time zone")),
+        );
 
         approx_eq(snapshot.total_cost_today, expected_cost);
         approx_eq(snapshot.sources[0].cost_usd, expected_cost);
@@ -533,11 +621,11 @@ mod tests {
 
     #[test]
     fn unsupported_models_keep_cost_pending() {
-        let now = Local
-            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 24, 16, 0, 0)
             .single()
-            .expect("local datetime");
-        let occurred_at = now.with_timezone(&Utc);
+            .expect("utc datetime");
+        let occurred_at = now;
         let report = SourceReport {
             status: ready_status("cursor", "Cursor"),
             usage_events: vec![UsageEvent {
@@ -571,7 +659,11 @@ mod tests {
             }],
         };
 
-        let snapshot = build_dashboard_snapshot_from_reports(vec![report], now);
+        let snapshot = build_dashboard_snapshot_from_reports(
+            vec![report],
+            now,
+            SnapshotTimeZone::Named("Asia/Shanghai".parse::<Tz>().expect("time zone")),
+        );
 
         assert_eq!(snapshot.total_tokens_today, 8_000);
         approx_eq(snapshot.total_cost_today, 0.0);
@@ -581,11 +673,11 @@ mod tests {
 
     #[test]
     fn source_detail_snapshot_rolls_up_source_history_and_costs() {
-        let now = Local
-            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 24, 16, 0, 0)
             .single()
-            .expect("local datetime");
-        let occurred_at = now.with_timezone(&Utc);
+            .expect("utc datetime");
+        let occurred_at = now;
         let expected_cost = 0.006_375;
         let report = SourceReport {
             status: ready_status("codex", "Codex"),
@@ -622,13 +714,73 @@ mod tests {
             }],
         };
 
-        let snapshot =
-            build_source_snapshot_from_reports(&[report], now, "codex").expect("source snapshot");
+        let snapshot = build_source_snapshot_from_reports(
+            &[report],
+            now,
+            SnapshotTimeZone::Named("Asia/Shanghai".parse::<Tz>().expect("time zone")),
+            "codex",
+        )
+        .expect("source snapshot");
 
         assert_eq!(snapshot.source_id, "codex");
         approx_eq(snapshot.today_cost_usd, expected_cost);
         approx_eq(snapshot.week[6].total_cost_usd, expected_cost);
         approx_eq(snapshot.sessions[0].cost_usd, expected_cost);
+    }
+
+    #[test]
+    fn dashboard_snapshot_uses_requested_time_zone_for_day_boundaries() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 24, 16, 30, 0)
+            .single()
+            .expect("utc datetime");
+        let occurred_at = Utc
+            .with_ymd_and_hms(2026, 3, 24, 16, 10, 0)
+            .single()
+            .expect("utc datetime");
+        let report = SourceReport {
+            status: ready_status("codex", "Codex"),
+            usage_events: vec![UsageEvent {
+                source_id: "codex",
+                occurred_at,
+                model: "gpt-5.4".into(),
+                token_breakdown: TokenBreakdown {
+                    input_tokens: 1_000,
+                    output_tokens: 500,
+                    ..TokenBreakdown::default()
+                },
+                total_tokens: 1_500,
+                calculation_method: CalculationMethod::Native,
+                session_id: "session-1".into(),
+            }],
+            sessions: vec![SessionRecord {
+                updated_at: occurred_at,
+                summary: SessionSummary {
+                    id: "session-1".into(),
+                    source_id: "codex".into(),
+                    title: "Session".into(),
+                    preview: "Preview".into(),
+                    source: "Codex".into(),
+                    workspace: "burned".into(),
+                    model: "gpt-5.4".into(),
+                    started_at: "Mar 25 00:10".into(),
+                    total_tokens: 1_500,
+                    cost_usd: 0.0,
+                    calculation_method: CalculationMethod::Native,
+                    status: "indexed".into(),
+                },
+            }],
+        };
+
+        let snapshot = build_dashboard_snapshot_from_reports(
+            vec![report],
+            now,
+            SnapshotTimeZone::Named("Asia/Shanghai".parse::<Tz>().expect("time zone")),
+        );
+
+        assert_eq!(snapshot.total_tokens_today, 1_500);
+        assert_eq!(snapshot.week.last().expect("daily point").date, "2026-03-25");
+        assert_eq!(snapshot.week.last().expect("daily point").total_tokens, 1_500);
     }
 
     fn ready_status(id: &str, name: &str) -> SourceStatus {

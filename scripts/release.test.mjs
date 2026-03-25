@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+const rootDir = path.join(dirname, "..");
 const releaseScriptPath = path.join(dirname, "release.mjs");
-const releaseShellPath = path.join(dirname, "release.sh");
+const legacyReleaseShellPath = path.join(dirname, "release.sh");
+const releaseShellPath = path.join(rootDir, "release.sh");
+const burnedControlPath = path.join(rootDir, "burned.sh");
 
 async function loadReleaseModule() {
   assert.equal(fs.existsSync(releaseScriptPath), true);
@@ -109,6 +114,7 @@ test("buildClaudeCommitPrompt asks for one conventional commit line from the sta
 });
 
 test("release.sh exists as an executable wrapper around the node release flow", () => {
+  assert.equal(fs.existsSync(legacyReleaseShellPath), false);
   assert.equal(fs.existsSync(releaseShellPath), true);
 
   const shellSource = fs.readFileSync(releaseShellPath, "utf8");
@@ -118,4 +124,98 @@ test("release.sh exists as an executable wrapper around the node release flow", 
   assert.match(shellSource, /exec node "\$ROOT_DIR\/scripts\/release\.mjs" "\$@"/);
   assert.doesNotMatch(shellSource, /Usage: \.\/scripts\/release\.sh/);
   assert.notEqual(mode & 0o111, 0);
+});
+
+test("burned.sh exists at the project root as a quick control wrapper", () => {
+  assert.equal(fs.existsSync(burnedControlPath), true);
+
+  const shellSource = fs.readFileSync(burnedControlPath, "utf8");
+  const mode = fs.statSync(burnedControlPath).mode;
+
+  assert.match(shellSource, /^#!\/usr\/bin\/env sh/m);
+  assert.match(shellSource, /case "\$\{1:-restart\}" in/);
+  assert.match(shellSource, /start\)/);
+  assert.match(shellSource, /stop\)/);
+  assert.match(shellSource, /restart\)/);
+  assert.match(shellSource, /status\)/);
+  assert.match(shellSource, /"\$ROOT_DIR\/burned"/);
+  assert.notEqual(mode & 0o111, 0);
+});
+
+test("burned.sh keeps tracking the spawned burned-web service after the launcher exits", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "burned-control-"));
+  const tempControlPath = path.join(tempRoot, "burned.sh");
+  const tempLauncherPath = path.join(tempRoot, "burned");
+  const tempServicePath = path.join(tempRoot, "burned-web");
+  const pidFilePath = path.join(tempRoot, ".burned.pid");
+  const logFilePath = path.join(tempRoot, ".burned.log");
+
+  fs.copyFileSync(burnedControlPath, tempControlPath);
+  fs.writeFileSync(
+    tempLauncherPath,
+    `#!/usr/bin/env sh
+set -eu
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+"$ROOT_DIR/burned-web" &
+echo "Burned dashboard is running at http://127.0.0.1:47831/"
+sleep 2
+`,
+  );
+  fs.writeFileSync(
+    tempServicePath,
+    `#!/usr/bin/env sh
+trap 'exit 0' TERM INT
+while :; do
+  sleep 1
+done
+`,
+  );
+
+  fs.chmodSync(tempControlPath, 0o755);
+  fs.chmodSync(tempLauncherPath, 0o755);
+  fs.chmodSync(tempServicePath, 0o755);
+
+  let trackedPid = null;
+
+  try {
+    const startOutput = execFileSync(tempControlPath, ["start"], {
+      cwd: tempRoot,
+      encoding: "utf8",
+    });
+
+    assert.match(startOutput, /Burned started \(PID \d+\)\./);
+    assert.equal(fs.existsSync(pidFilePath), true);
+
+    trackedPid = fs.readFileSync(pidFilePath, "utf8").trim();
+    assert.match(trackedPid, /^\d+$/);
+
+    const trackedCommand = execFileSync("ps", ["-p", trackedPid, "-o", "command="], {
+      encoding: "utf8",
+    }).trim();
+    assert.match(trackedCommand, /burned-web/);
+
+    execFileSync("sleep", ["3"]);
+
+    const statusOutput = execFileSync(tempControlPath, ["status"], {
+      cwd: tempRoot,
+      encoding: "utf8",
+    });
+    assert.match(statusOutput, new RegExp(`Burned is running \\(PID ${trackedPid}\\)\\.`));
+
+    const logSource = fs.readFileSync(logFilePath, "utf8");
+    assert.equal(logSource.length >= 0, true);
+  } finally {
+    try {
+      execFileSync(tempControlPath, ["stop"], {
+        cwd: tempRoot,
+        encoding: "utf8",
+      });
+    } catch {}
+
+    if (trackedPid) {
+      try {
+        execFileSync("kill", ["-KILL", trackedPid], { stdio: "ignore" });
+      } catch {}
+    }
+  }
 });

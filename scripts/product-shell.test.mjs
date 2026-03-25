@@ -83,3 +83,10 @@ test("source rows drill into a dedicated source detail page", () => {
   assert.match(appSource, /function SourceDetailPage\(/);
   assert.match(appSource, /window\.history\.pushState/);
 });
+
+test("frontend passes an explicit time zone through every snapshot request", () => {
+  assert.match(appSource, /Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone/);
+  assert.match(appSource, /invoke<DashboardSnapshot>\("get_dashboard_snapshot", \{ timeZone \}\)/);
+  assert.match(appSource, /invoke<SourceDetailSnapshot>\("get_source_snapshot", \{ sourceId, timeZone \}\)/);
+  assert.match(appSource, /"X-Burned-Time-Zone": timeZone/);
+});

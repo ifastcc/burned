@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 import { createEmptyDashboardSnapshot } from "./data/empty-dashboard";
-import { toLocalIsoDate } from "./date-utils.mjs";
+import { resolveSelectedDateAfterRefresh, toLocalIsoDate } from "./date-utils.mjs";
 import { showcaseCopy } from "./showcase-copy.mjs";
 import type {
   DailyUsagePoint,
@@ -145,6 +145,27 @@ function pickPeakDay(data: DailyUsagePoint[]) {
 
 function formatTokenFigure(tokens: number, locale: Locale) {
   return formatFriendlyNumber(tokens, locale, 1);
+}
+
+function useRetainedDateSelection(data: DailyUsagePoint[]) {
+  const latestDay = data[data.length - 1];
+  const [selectedDate, setSelectedDate] = useState(latestDay.date);
+  const previousLatestDateRef = useRef(latestDay.date);
+
+  useEffect(() => {
+    const availableDates = data.map((day) => day.date);
+    setSelectedDate((current) =>
+      resolveSelectedDateAfterRefresh({
+        currentDate: current,
+        previousLatestDate: previousLatestDateRef.current,
+        nextLatestDate: latestDay.date,
+        availableDates,
+      }),
+    );
+    previousLatestDateRef.current = latestDay.date;
+  }, [data, latestDay.date]);
+
+  return { latestDay, selectedDate, setSelectedDate };
 }
 
 function TrendInspector({
@@ -407,16 +428,9 @@ function WeeklyBurnCard({
 
   const total7 = data.reduce((sum, day) => sum + day.totalTokens, 0);
   const avg7 = data.length === 0 ? 0 : Math.round(total7 / data.length);
-  const latestDay = data[data.length - 1];
-  const [selectedDate, setSelectedDate] = useState(latestDay.date);
+  const { selectedDate, setSelectedDate } = useRetainedDateSelection(data);
 
-  useEffect(() => {
-    setSelectedDate((current) =>
-      data.some((day) => day.date === current) ? current : latestDay.date,
-    );
-  }, [data, latestDay.date]);
-
-  const activeDay = data.find((day) => day.date === selectedDate) ?? latestDay;
+  const activeDay = data.find((day) => day.date === selectedDate) ?? data[data.length - 1];
 
   return (
     <section className="trend-section weekly-trend-section">
@@ -500,20 +514,13 @@ function MonthlyTrendCard({
       : Math.round(week.reduce((sum, day) => sum + day.totalTokens, 0) / week.length);
   const delta = avg30 > 0 ? (avg7 - avg30) / avg30 : null;
   const peakDay = pickPeakDay(data);
-  const latestDay = data[data.length - 1];
-  const [selectedDate, setSelectedDate] = useState(latestDay.date);
-
-  useEffect(() => {
-    setSelectedDate((current) =>
-      data.some((day) => day.date === current) ? current : latestDay.date,
-    );
-  }, [data, latestDay.date]);
+  const { selectedDate, setSelectedDate } = useRetainedDateSelection(data);
 
   const headline =
     delta != null && Math.abs(delta) >= 0.005
       ? monthDeltaText(formatSignedPercent(delta, locale))
       : monthFlatText;
-  const activeDay = data.find((day) => day.date === selectedDate) ?? latestDay;
+  const activeDay = data.find((day) => day.date === selectedDate) ?? data[data.length - 1];
 
   return (
     <section className="trend-section monthly-trend-section">

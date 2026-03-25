@@ -1,7 +1,7 @@
 {
   "name": "burned",
   "private": false,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Local AI usage tracker with a browser dashboard and source-native token collectors.",
   "type": "module",
   "author": "kbaicai",
@@ -42,10 +42,13 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "burned": "node ./bin/burned.mjs",
+    "release:patch": "node ./scripts/release.mjs patch",
+    "release:minor": "node ./scripts/release.mjs minor",
+    "release:major": "node ./scripts/release.mjs major",
     "rust:check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "tauri:dev": "node ./scripts/tauri-dev.mjs",
     "tauri:build": "tauri build",
-    "test": "node --test scripts/dev-ports.test.mjs scripts/burned-cli.test.mjs scripts/date-utils.test.mjs scripts/product-shell.test.mjs",
+    "test": "node --test scripts/dev-ports.test.mjs scripts/burned-cli.test.mjs scripts/date-utils.test.mjs scripts/product-shell.test.mjs scripts/release.test.mjs",
     "prepack": "pnpm build"
   },
   "dependencies": {

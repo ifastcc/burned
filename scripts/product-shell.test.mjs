@@ -23,6 +23,12 @@ test("package.json exposes a real app startup flow without replacing pnpm dev", 
   assert.equal(packageJson.scripts["dev:app"], "pnpm build && node ./bin/burned.mjs");
 });
 
+test("package.json exposes release shortcuts for patch, minor, and major publishes", () => {
+  assert.equal(packageJson.scripts["release:patch"], "node ./scripts/release.mjs patch");
+  assert.equal(packageJson.scripts["release:minor"], "node ./scripts/release.mjs minor");
+  assert.equal(packageJson.scripts["release:major"], "node ./scripts/release.mjs major");
+});
+
 test("trend area splits the 7-day and 30-day stories into separate cards", () => {
   assert.match(appSource, /function WeeklyBurnCard\(/);
   assert.match(appSource, /function MonthlyTrendCard\(/);

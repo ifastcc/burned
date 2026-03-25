@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 import { createEmptyDashboardSnapshot } from "./data/empty-dashboard";
-import { resolveSelectedDateAfterRefresh, toIsoDateInTimeZone } from "./date-utils.mjs";
+import {
+  buildWeeklyBurnCopy,
+  getDefaultSelectedDate,
+  resolveSelectedDateAfterRefresh,
+  toIsoDateInTimeZone,
+} from "./date-utils.mjs";
 import { showcaseCopy } from "./showcase-copy.mjs";
 import type {
   DailyUsagePoint,
@@ -163,23 +168,28 @@ function formatTokenFigure(tokens: number, locale: Locale) {
 
 function useRetainedDateSelection(data: DailyUsagePoint[]) {
   const latestDay = data[data.length - 1];
-  const [selectedDate, setSelectedDate] = useState(latestDay.date);
-  const previousLatestDateRef = useRef(latestDay.date);
+  const availableDates = data.map((day) => day.date);
+  const todayDate = toIsoDateInTimeZone(new Date(), getResolvedTimeZone());
+  const defaultDate = getDefaultSelectedDate({
+    availableDates,
+    todayDate,
+  });
+  const [selectedDate, setSelectedDate] = useState(defaultDate);
+  const previousDefaultDateRef = useRef(defaultDate);
 
   useEffect(() => {
-    const availableDates = data.map((day) => day.date);
-    setSelectedDate((current) =>
+    setSelectedDate((current: string) =>
       resolveSelectedDateAfterRefresh({
         currentDate: current,
-        previousLatestDate: previousLatestDateRef.current,
-        nextLatestDate: latestDay.date,
+        previousDefaultDate: previousDefaultDateRef.current,
+        nextDefaultDate: defaultDate,
         availableDates,
       }),
     );
-    previousLatestDateRef.current = latestDay.date;
-  }, [data, latestDay.date]);
+    previousDefaultDateRef.current = defaultDate;
+  }, [data, defaultDate]);
 
-  return { latestDay, selectedDate, setSelectedDate };
+  return { latestDay, selectedDate, setSelectedDate, todayDate };
 }
 
 function TrendInspector({
@@ -216,11 +226,13 @@ function TrendInspector({
 function WeeklyDayFocus({
   day,
   locale,
+  metaDateLabel,
   estimatedCost,
   pricingPending,
 }: {
   day: DailyUsagePoint;
   locale: Locale;
+  metaDateLabel: string;
   estimatedCost: (cost: string) => string;
   pricingPending: string;
 }) {
@@ -233,7 +245,7 @@ function WeeklyDayFocus({
         {hasUsage ? formatTokenFigure(day.totalTokens, locale) : "—"}
       </strong>
       <div className="weekly-focus-meta">
-        <span className="weekly-focus-date">{formatDayStamp(day.date, locale)}</span>
+        <span className="weekly-focus-date">{metaDateLabel}</span>
         {hasUsage && (
           <>
             <span className="weekly-focus-sep" aria-hidden="true">
@@ -421,18 +433,18 @@ function WeeklyBurnCard({
   data,
   locale,
   label,
-  title,
   totalLabel,
   avgDayLabel,
+  peakLabel,
   estimatedCost,
   pricingPending,
 }: {
   data: DailyUsagePoint[];
   locale: Locale;
   label: string;
-  title: string;
   totalLabel: string;
   avgDayLabel: string;
+  peakLabel: string;
   estimatedCost: (cost: string) => string;
   pricingPending: string;
 }) {
@@ -442,9 +454,15 @@ function WeeklyBurnCard({
 
   const total7 = data.reduce((sum, day) => sum + day.totalTokens, 0);
   const avg7 = data.length === 0 ? 0 : Math.round(total7 / data.length);
-  const { selectedDate, setSelectedDate } = useRetainedDateSelection(data);
+  const peakDay = pickPeakDay(data);
+  const { selectedDate, setSelectedDate, todayDate } = useRetainedDateSelection(data);
 
   const activeDay = data.find((day) => day.date === selectedDate) ?? data[data.length - 1];
+  const weeklyBurnCopy = buildWeeklyBurnCopy({
+    date: activeDay.date,
+    todayDate,
+    locale,
+  });
 
   return (
     <section className="trend-section weekly-trend-section">
@@ -452,10 +470,11 @@ function WeeklyBurnCard({
         <div className="weekly-burn-head">
           <div className="trend-copy weekly-trend-copy">
             <p className="trend-kicker">{label}</p>
-            <h2 className="trend-title">{title}</h2>
+            <h2 className="trend-title">{weeklyBurnCopy.title}</h2>
             <WeeklyDayFocus
               day={activeDay}
               locale={locale}
+              metaDateLabel={weeklyBurnCopy.metaDate}
               estimatedCost={estimatedCost}
               pricingPending={pricingPending}
             />
@@ -471,6 +490,12 @@ function WeeklyBurnCard({
               <span className="trend-stat-label">{avgDayLabel}</span>
               <strong className="trend-stat-value">
                 {formatFriendlyNumber(avg7, locale, 1)}
+              </strong>
+            </div>
+            <div className="trend-stat">
+              <span className="trend-stat-label">{peakLabel}</span>
+              <strong className="trend-stat-value">
+                {formatFriendlyNumber(peakDay.totalTokens, locale, 1)}
               </strong>
             </div>
           </div>
@@ -795,9 +820,9 @@ function SourceDetailPage({
         data={snapshot.week}
         locale={locale}
         label={sc.last7Days}
-        title={sc.weekFocusTitle}
         totalLabel={sc.weekTotal}
         avgDayLabel={sc.avgDay}
+        peakLabel={sc.weekPeakStat}
         estimatedCost={estimatedCost}
         pricingPending={pricingPending}
       />
@@ -1039,9 +1064,9 @@ export default function App() {
             data={week}
             locale={locale}
             label={sc.last7Days}
-            title={sc.weekFocusTitle}
             totalLabel={sc.weekTotal}
             avgDayLabel={sc.avgDay}
+            peakLabel={sc.weekPeakStat}
             estimatedCost={sc.estimatedCost}
             pricingPending={sc.pricingPending}
           />

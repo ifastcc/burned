@@ -24,8 +24,8 @@ test("resolveSelectedDateAfterRefresh advances to the new latest day after rollo
   assert.equal(
     dateUtils.resolveSelectedDateAfterRefresh({
       currentDate: "2026-03-23",
-      previousLatestDate: "2026-03-23",
-      nextLatestDate: "2026-03-24",
+      previousDefaultDate: "2026-03-23",
+      nextDefaultDate: "2026-03-24",
       availableDates: [
         "2026-03-18",
         "2026-03-19",
@@ -49,8 +49,8 @@ test("resolveSelectedDateAfterRefresh preserves deliberate older selections", ()
   assert.equal(
     dateUtils.resolveSelectedDateAfterRefresh({
       currentDate: "2026-03-21",
-      previousLatestDate: "2026-03-23",
-      nextLatestDate: "2026-03-24",
+      previousDefaultDate: "2026-03-23",
+      nextDefaultDate: "2026-03-24",
       availableDates: [
         "2026-03-18",
         "2026-03-19",
@@ -62,5 +62,107 @@ test("resolveSelectedDateAfterRefresh preserves deliberate older selections", ()
       ],
     }),
     "2026-03-21",
+  );
+});
+
+test("getDefaultSelectedDate prefers yesterday when the week includes both today and yesterday", () => {
+  assert.equal(typeof dateUtils.getDefaultSelectedDate, "function");
+  if (typeof dateUtils.getDefaultSelectedDate !== "function") {
+    return;
+  }
+
+  assert.equal(
+    dateUtils.getDefaultSelectedDate({
+      availableDates: [
+        "2026-03-19",
+        "2026-03-20",
+        "2026-03-21",
+        "2026-03-22",
+        "2026-03-23",
+        "2026-03-24",
+        "2026-03-25",
+      ],
+      todayDate: "2026-03-25",
+    }),
+    "2026-03-24",
+  );
+});
+
+test("getDefaultSelectedDate falls back to the latest available day when yesterday is missing", () => {
+  assert.equal(typeof dateUtils.getDefaultSelectedDate, "function");
+  if (typeof dateUtils.getDefaultSelectedDate !== "function") {
+    return;
+  }
+
+  assert.equal(
+    dateUtils.getDefaultSelectedDate({
+      availableDates: [
+        "2026-03-19",
+        "2026-03-20",
+        "2026-03-21",
+        "2026-03-22",
+        "2026-03-23",
+        "2026-03-25",
+      ],
+      todayDate: "2026-03-25",
+    }),
+    "2026-03-25",
+  );
+});
+
+test("buildWeeklyBurnCopy uses relative Chinese titles and exact dates for recent days", () => {
+  assert.equal(typeof dateUtils.buildWeeklyBurnCopy, "function");
+  if (typeof dateUtils.buildWeeklyBurnCopy !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    dateUtils.buildWeeklyBurnCopy({
+      date: "2026-03-24",
+      todayDate: "2026-03-25",
+      locale: "zh-CN",
+    }),
+    {
+      title: "昨天消耗",
+      metaDate: "周二 3/24",
+    },
+  );
+});
+
+test("buildWeeklyBurnCopy switches to absolute Chinese date titles and short meta for older days", () => {
+  assert.equal(typeof dateUtils.buildWeeklyBurnCopy, "function");
+  if (typeof dateUtils.buildWeeklyBurnCopy !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    dateUtils.buildWeeklyBurnCopy({
+      date: "2026-03-21",
+      todayDate: "2026-03-25",
+      locale: "zh-CN",
+    }),
+    {
+      title: "3月21日消耗",
+      metaDate: "周六",
+    },
+  );
+});
+
+test("buildWeeklyBurnCopy includes the year in English titles once the selected day crosses years", () => {
+  assert.equal(typeof dateUtils.buildWeeklyBurnCopy, "function");
+  if (typeof dateUtils.buildWeeklyBurnCopy !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    dateUtils.buildWeeklyBurnCopy({
+      date: "2025-12-31",
+      todayDate: "2026-01-03",
+      locale: "en-US",
+    }),
+    {
+      title: "Burn on Dec 31, 2025",
+      metaDate: "Wed",
+    },
   );
 });

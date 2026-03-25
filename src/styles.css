@@ -501,8 +501,8 @@ button {
 }
 
 .weekly-stat-grid {
-  grid-template-columns: repeat(2, minmax(120px, 1fr));
-  min-width: 280px;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  min-width: 420px;
 }
 
 .monthly-stat-grid {

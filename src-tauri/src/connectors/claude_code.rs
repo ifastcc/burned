@@ -13,7 +13,9 @@ use walkdir::WalkDir;
 use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
-use crate::models::{CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus};
+use crate::models::{
+    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+};
 use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "claude_code";
@@ -78,9 +80,7 @@ fn collect_claude() -> Result<SourceReport> {
     let parse_target_total = parse_targets.len();
     for (index, path) in parse_targets.into_iter().enumerate() {
         if parse_target_total > 0
-            && (index == 0
-                || index + 1 == parse_target_total
-                || (index + 1) % 25 == 0)
+            && (index == 0 || index + 1 == parse_target_total || (index + 1) % 25 == 0)
         {
             report_scan_detail(
                 SOURCE_NAME,

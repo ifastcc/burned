@@ -1065,88 +1065,6 @@ button {
 }
 
 /* ============================================
-   Connector grid
-   ============================================ */
-.conn-section {
-  animation: fade-up 600ms ease-out 320ms both;
-}
-
-.conn-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
-  gap: var(--sp-sm);
-}
-
-.conn-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px var(--sp-lg);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface);
-  backdrop-filter: blur(8px);
-  transition: border-color 180ms ease;
-}
-
-.conn-card:hover {
-  border-color: var(--border-hover);
-}
-
-.conn-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.conn-dot.ready {
-  background: var(--ember);
-  box-shadow: 0 0 8px rgba(255, 107, 44, 0.45);
-}
-
-.conn-dot.partial {
-  background: var(--flame);
-  box-shadow: 0 0 6px rgba(255, 196, 108, 0.3);
-}
-
-.conn-dot.missing {
-  background: var(--ash);
-  opacity: 0.6;
-}
-
-.conn-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.conn-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.conn-state {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.conn-meta {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-muted);
-  text-align: right;
-  white-space: nowrap;
-}
-
-/* ============================================
    Session feed
    ============================================ */
 .sess-section {
@@ -1342,9 +1260,6 @@ button {
     font-size: 9px;
   }
 
-  .conn-grid {
-    grid-template-columns: 1fr 1fr;
-  }
 }
 
 @media (max-width: 420px) {
@@ -1354,10 +1269,6 @@ button {
   }
 
   .source-detail-meta {
-    grid-template-columns: 1fr;
-  }
-
-  .conn-grid {
     grid-template-columns: 1fr;
   }
 

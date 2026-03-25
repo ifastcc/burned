@@ -13,10 +13,11 @@ use connectors::{collect_all, collect_all_with_progress, SourceReport};
 pub use models::DashboardSnapshot;
 use models::{
     CalculationMethod, DailyUsagePoint, LongContextSessionSummary, LongContextSummary,
-    PricingCoverage, SessionGroup, SessionSummary, SourceDetailSnapshot, SourceStatus,
-    SourceUsage,
+    PricingCoverage, SessionGroup, SessionSummary, SourceDetailSnapshot, SourceStatus, SourceUsage,
 };
-use pricing::{estimate_cost_usd, estimate_cost_usd_with_long_context, triggers_long_context_pricing};
+use pricing::{
+    estimate_cost_usd, estimate_cost_usd_with_long_context, triggers_long_context_pricing,
+};
 
 #[tauri::command]
 fn get_dashboard_snapshot(time_zone: Option<String>) -> DashboardSnapshot {
@@ -69,8 +70,13 @@ impl SnapshotTimeZone {
 
     fn headline_date(self, now: DateTime<Utc>) -> String {
         match self {
-            SnapshotTimeZone::Named(time_zone) => now.with_timezone(&time_zone).format("%B %-d, %Y").to_string(),
-            SnapshotTimeZone::SystemLocal => now.with_timezone(&Local).format("%B %-d, %Y").to_string(),
+            SnapshotTimeZone::Named(time_zone) => now
+                .with_timezone(&time_zone)
+                .format("%B %-d, %Y")
+                .to_string(),
+            SnapshotTimeZone::SystemLocal => {
+                now.with_timezone(&Local).format("%B %-d, %Y").to_string()
+            }
         }
     }
 
@@ -212,8 +218,13 @@ fn build_dashboard_snapshot_from_reports(
     let burn_rate_per_hour = (total_tokens_today as f64 / elapsed_hours).round() as u64;
 
     let week = build_weekly_usage(&usage_events, now, snapshot_time_zone, &session_pricing);
-    let daily_history =
-        build_daily_history(&usage_events, now, 180, snapshot_time_zone, &session_pricing);
+    let daily_history = build_daily_history(
+        &usage_events,
+        now,
+        180,
+        snapshot_time_zone,
+        &session_pricing,
+    );
     let sources = build_source_usage(
         &reports,
         &source_names,
@@ -255,7 +266,9 @@ fn build_source_snapshot_from_reports(
     snapshot_time_zone: SnapshotTimeZone,
     source_id: &str,
 ) -> Option<SourceDetailSnapshot> {
-    let report = reports.iter().find(|report| report.status.id == source_id)?;
+    let report = reports
+        .iter()
+        .find(|report| report.status.id == source_id)?;
     let usage_events = report.usage_events.iter().collect::<Vec<_>>();
     let session_pricing = build_session_pricing_profiles(reports);
     let week = build_weekly_usage(&usage_events, now, snapshot_time_zone, &session_pricing);
@@ -342,12 +355,13 @@ pub fn build_dashboard_snapshot_json_with_progress<F>(
 where
     F: FnMut(usize, usize, &str),
 {
-    serde_json::to_string(&build_dashboard_snapshot_with_progress(on_progress, time_zone))
+    serde_json::to_string(&build_dashboard_snapshot_with_progress(
+        on_progress,
+        time_zone,
+    ))
 }
 
-pub fn set_scan_detail_hook(
-    hook: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
-) {
+pub fn set_scan_detail_hook(hook: Option<Arc<dyn Fn(String, String) + Send + Sync>>) {
     connectors::set_scan_detail_hook(hook);
 }
 
@@ -361,7 +375,9 @@ fn pricing_coverage(total_sessions: usize, priced_sessions: usize) -> PricingCov
     }
 }
 
-fn build_session_pricing_profiles(reports: &[SourceReport]) -> HashMap<String, SessionPricingProfile> {
+fn build_session_pricing_profiles(
+    reports: &[SourceReport],
+) -> HashMap<String, SessionPricingProfile> {
     let mut events_by_session = HashMap::<String, Vec<&connectors::UsageEvent>>::new();
     for report in reports {
         for event in &report.usage_events {
@@ -376,7 +392,10 @@ fn build_session_pricing_profiles(reports: &[SourceReport]) -> HashMap<String, S
         .into_iter()
         .map(|(session_key, events)| {
             let long_context_applies = events.iter().any(|event| {
-                triggers_long_context_pricing(&event.model, event.token_breakdown.raw_input_tokens())
+                triggers_long_context_pricing(
+                    &event.model,
+                    event.token_breakdown.raw_input_tokens(),
+                )
             });
             let peak_input_tokens = events
                 .iter()
@@ -469,7 +488,13 @@ fn build_daily_history(
     snapshot_time_zone: SnapshotTimeZone,
     session_pricing: &HashMap<String, SessionPricingProfile>,
 ) -> Vec<DailyUsagePoint> {
-    build_usage_window(usage_events, now, day_count, snapshot_time_zone, session_pricing)
+    build_usage_window(
+        usage_events,
+        now,
+        day_count,
+        snapshot_time_zone,
+        session_pricing,
+    )
 }
 
 fn build_usage_window(
@@ -479,8 +504,7 @@ fn build_usage_window(
     snapshot_time_zone: SnapshotTimeZone,
     session_pricing: &HashMap<String, SessionPricingProfile>,
 ) -> Vec<DailyUsagePoint> {
-    let mut totals =
-        HashMap::<String, (u64, u64, f64, HashSet<String>, HashSet<String>)>::new();
+    let mut totals = HashMap::<String, (u64, u64, f64, HashSet<String>, HashSet<String>)>::new();
     for event in usage_events {
         let key = snapshot_time_zone
             .local_day(event.occurred_at)
@@ -502,7 +526,9 @@ fn build_usage_window(
     }
 
     (0..day_count)
-        .map(|offset| snapshot_time_zone.today(now) - Duration::days((day_count - 1 - offset) as i64))
+        .map(|offset| {
+            snapshot_time_zone.today(now) - Duration::days((day_count - 1 - offset) as i64)
+        })
         .map(|day| {
             let key = day.format("%Y-%m-%d").to_string();
             let (total_tokens, exact_tokens, total_cost_usd, session_keys, priced_session_keys) =
@@ -565,9 +591,19 @@ fn build_source_usage(
         .iter()
         .filter(|report| !matches!(report.status.state, models::SourceState::Missing))
         .map(|report| {
-            let (today_tokens, yesterday_tokens, today_cost_usd, today_sessions, today_priced_sessions) = usage_by_source
-                .remove(&report.status.id)
-                .unwrap_or((0, 0, 0.0, HashSet::new(), HashSet::new()));
+            let (
+                today_tokens,
+                yesterday_tokens,
+                today_cost_usd,
+                today_sessions,
+                today_priced_sessions,
+            ) = usage_by_source.remove(&report.status.id).unwrap_or((
+                0,
+                0,
+                0.0,
+                HashSet::new(),
+                HashSet::new(),
+            ));
             let trend = if today_tokens > yesterday_tokens + (yesterday_tokens / 20).max(1) {
                 "up"
             } else if yesterday_tokens > today_tokens + (today_tokens / 20).max(1) {
@@ -811,12 +847,25 @@ mod tests {
         approx_eq(snapshot.total_cost_today, expected_cost);
         assert_eq!(snapshot.pricing_coverage, PricingCoverage::Complete);
         approx_eq(snapshot.sources[0].cost_usd, expected_cost);
-        assert_eq!(snapshot.sources[0].pricing_coverage, PricingCoverage::Complete);
+        assert_eq!(
+            snapshot.sources[0].pricing_coverage,
+            PricingCoverage::Complete
+        );
         approx_eq(snapshot.sessions[0].cost_usd, expected_cost);
-        assert_eq!(snapshot.sessions[0].pricing_coverage, PricingCoverage::Complete);
+        assert_eq!(
+            snapshot.sessions[0].pricing_coverage,
+            PricingCoverage::Complete
+        );
         approx_eq(snapshot.week[6].total_cost_usd, expected_cost);
         assert_eq!(snapshot.week[6].pricing_coverage, PricingCoverage::Complete);
-        approx_eq(snapshot.daily_history.last().expect("daily point").total_cost_usd, expected_cost);
+        approx_eq(
+            snapshot
+                .daily_history
+                .last()
+                .expect("daily point")
+                .total_cost_usd,
+            expected_cost,
+        );
     }
 
     #[test]
@@ -871,9 +920,15 @@ mod tests {
         approx_eq(snapshot.total_cost_today, 0.0);
         assert_eq!(snapshot.pricing_coverage, PricingCoverage::Pending);
         approx_eq(snapshot.sources[0].cost_usd, 0.0);
-        assert_eq!(snapshot.sources[0].pricing_coverage, PricingCoverage::Pending);
+        assert_eq!(
+            snapshot.sources[0].pricing_coverage,
+            PricingCoverage::Pending
+        );
         approx_eq(snapshot.sessions[0].cost_usd, 0.0);
-        assert_eq!(snapshot.sessions[0].pricing_coverage, PricingCoverage::Pending);
+        assert_eq!(
+            snapshot.sessions[0].pricing_coverage,
+            PricingCoverage::Pending
+        );
     }
 
     #[test]
@@ -989,8 +1044,14 @@ mod tests {
         );
 
         assert_eq!(snapshot.total_tokens_today, 1_500);
-        assert_eq!(snapshot.week.last().expect("daily point").date, "2026-03-25");
-        assert_eq!(snapshot.week.last().expect("daily point").total_tokens, 1_500);
+        assert_eq!(
+            snapshot.week.last().expect("daily point").date,
+            "2026-03-25"
+        );
+        assert_eq!(
+            snapshot.week.last().expect("daily point").total_tokens,
+            1_500
+        );
     }
 
     #[test]

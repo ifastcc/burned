@@ -71,19 +71,22 @@ fn scan_initial_snapshot() -> Result<String> {
         })
     }));
 
-    let body = burned_lib::build_dashboard_snapshot_json_with_progress({
-        let progress_state = Arc::clone(&progress_state);
-        move |completed, total, label| {
-            let mut state = progress_state
-                .lock()
-                .expect("Burned scan progress mutex poisoned");
-            state.completed = completed;
-            state.total = total;
-            state.label = label.to_string();
-            state.detail = None;
-            print_progress_line(completed, total, label, None);
-        }
-    }, None)
+    let body = burned_lib::build_dashboard_snapshot_json_with_progress(
+        {
+            let progress_state = Arc::clone(&progress_state);
+            move |completed, total, label| {
+                let mut state = progress_state
+                    .lock()
+                    .expect("Burned scan progress mutex poisoned");
+                state.completed = completed;
+                state.total = total;
+                state.label = label.to_string();
+                state.detail = None;
+                print_progress_line(completed, total, label, None);
+            }
+        },
+        None,
+    )
     .context("serialize dashboard snapshot");
     burned_lib::set_scan_detail_hook(None);
     let body = body?;

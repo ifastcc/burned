@@ -89,6 +89,13 @@ test("source rows drill into a dedicated source detail page", () => {
   assert.match(appSource, /window\.history\.pushState/);
 });
 
+test("home page does not duplicate source comparison with a second connector status section", () => {
+  assert.doesNotMatch(appSource, /function ConnectorGrid\(/);
+  assert.doesNotMatch(appSource, /<section className="conn-section">/);
+  assert.equal(Object.hasOwn(showcaseCopy["en-US"], "connected"), false);
+  assert.equal(Object.hasOwn(showcaseCopy["zh-CN"], "connected"), false);
+});
+
 test("frontend passes an explicit time zone through every snapshot request", () => {
   assert.match(appSource, /Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone/);
   assert.match(appSource, /invoke<DashboardSnapshot>\("get_dashboard_snapshot", \{ timeZone \}\)/);

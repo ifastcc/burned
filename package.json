@@ -1,7 +1,7 @@
 {
   "name": "burned",
   "private": false,
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Local AI usage tracker with a browser dashboard and source-native token collectors.",
   "type": "module",
   "author": "kbaicai",

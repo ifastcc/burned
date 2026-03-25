@@ -14,7 +14,6 @@ import type {
   PricingCoverage,
   SessionSummary,
   SourceDetailSnapshot,
-  SourceStatus,
   SourceUsage,
 } from "./data/schema";
 import {
@@ -718,33 +717,6 @@ function SourceList({
   );
 }
 
-function ConnectorGrid({
-  statuses,
-  locale,
-}: {
-  statuses: SourceStatus[];
-  locale: Locale;
-}) {
-  return (
-    <div className="conn-grid">
-      {statuses.map((st) => (
-        <div key={st.id} className="conn-card">
-          <span className={`conn-dot ${st.state}`} />
-          <div className="conn-info">
-            <span className="conn-name">{st.name}</span>
-            <span className="conn-state">
-              {sourceStateLabel(locale, st.state)}
-            </span>
-          </div>
-          {st.sessionCount != null && (
-            <span className="conn-meta">{st.sessionCount} sess</span>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function SessionFeed({
   sessions,
   locale,
@@ -1178,13 +1150,6 @@ export default function App() {
                 pricingPending={sc.pricingPending}
                 onOpenSource={(sourceId) => navigateToRoute({ kind: "source", sourceId })}
               />
-            </section>
-          )}
-
-          {snapshot.sourceStatuses.length > 0 && (
-            <section className="conn-section">
-              <SectionHeader label={sc.connected} />
-              <ConnectorGrid statuses={snapshot.sourceStatuses} locale={locale} />
             </section>
           )}
 

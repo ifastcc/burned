@@ -5,19 +5,27 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
+use serde::Deserialize;
 use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
-use crate::models::{CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus};
+use crate::models::{
+    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+};
 use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "codex";
 const SOURCE_NAME: &str = "Codex";
 
 pub struct CodexConnector;
+
+#[derive(Debug, Default, Deserialize)]
+struct CodexConfig {
+    sqlite_home: Option<String>,
+}
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 struct RawUsage {
@@ -82,8 +90,9 @@ fn collect_codex() -> Result<SourceReport> {
         return Ok(missing_report());
     }
 
-    let latest_state_db = latest_matching_file(&home, "state_", ".sqlite");
-    let log_dbs = matching_files(&home, "logs_", ".sqlite");
+    let sqlite_home = sqlite_home(&home);
+    let latest_state_db = latest_matching_file(&sqlite_home, "state_", ".sqlite");
+    let log_dbs = matching_files(&sqlite_home, "logs_", ".sqlite");
     let sessions_root = home.join("sessions");
 
     let mut status = SourceStatus {
@@ -279,9 +288,7 @@ fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<Vec<Usa
     let total_files = session_files.len();
 
     for (index, path) in session_files.iter().enumerate() {
-        if total_files > 0
-            && (index == 0 || index + 1 == total_files || (index + 1) % 50 == 0)
-        {
+        if total_files > 0 && (index == 0 || index + 1 == total_files || (index + 1) % 50 == 0) {
             report_scan_detail(
                 SOURCE_NAME,
                 format!("Session files {}/{}", index + 1, total_files),
@@ -313,8 +320,8 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
     // SQLite logs expose the full token total in `tool_token_count`, despite
     // the field name. Cached/reasoning counts are detail buckets within the
     // main input/output totals, just like the session JSONL path.
-    let total = extract_u64(body, "tool_token_count=")
-        .unwrap_or_else(|| input.saturating_add(output));
+    let total =
+        extract_u64(body, "tool_token_count=").unwrap_or_else(|| input.saturating_add(output));
     let token_breakdown = RawUsage {
         input_tokens: input,
         cached_input_tokens: cached,
@@ -372,7 +379,10 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
             continue;
         };
 
-        let entry_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
+        let entry_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if entry_type == "session_meta" {
             if let Some(meta_id) = value
                 .get("payload")
@@ -479,7 +489,11 @@ fn normalize_raw_usage(value: &Value) -> Option<RawUsage> {
     let cached_input_tokens = record
         .get("cached_input_tokens")
         .and_then(number_from_value)
-        .or_else(|| record.get("cache_read_input_tokens").and_then(number_from_value))
+        .or_else(|| {
+            record
+                .get("cache_read_input_tokens")
+                .and_then(number_from_value)
+        })
         .unwrap_or(0);
     let output_tokens = record
         .get("output_tokens")
@@ -526,8 +540,13 @@ fn subtract_raw_usage(current: RawUsage, previous: Option<&RawUsage>) -> RawUsag
 
 fn number_from_value(value: &Value) -> Option<u64> {
     value.as_u64().or_else(|| {
-        value.as_i64()
-            .and_then(|number| if number >= 0 { Some(number as u64) } else { None })
+        value.as_i64().and_then(|number| {
+            if number >= 0 {
+                Some(number as u64)
+            } else {
+                None
+            }
+        })
     })
 }
 
@@ -555,6 +574,22 @@ fn codex_home() -> Option<PathBuf> {
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+}
+
+fn sqlite_home(home: &Path) -> PathBuf {
+    configured_sqlite_home(home).unwrap_or_else(|| home.to_path_buf())
+}
+
+fn configured_sqlite_home(home: &Path) -> Option<PathBuf> {
+    let config_path = home.join("config.toml");
+    let contents = fs::read_to_string(config_path).ok()?;
+    let config = toml::from_str::<CodexConfig>(&contents).ok()?;
+    let sqlite_home = config.sqlite_home?.trim().to_string();
+    if sqlite_home.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(sqlite_home))
+    }
 }
 
 fn latest_matching_file(dir: &Path, prefix: &str, suffix: &str) -> Option<PathBuf> {
@@ -676,6 +711,21 @@ fn truncate(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("burned-{label}-{}-{nanos}", std::process::id()))
+    }
 
     #[test]
     fn parses_last_token_usage_from_session_jsonl() {
@@ -781,5 +831,61 @@ tool_token_count=1700";
         let event = parse_usage_event(0, body).expect("log usage event");
 
         assert_eq!(event.model, "gpt-5.4-mini");
+    }
+
+    #[test]
+    fn collect_codex_reads_state_db_from_sqlite_home_config() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let codex_home = unique_temp_dir("codex-home");
+        let sqlite_home = unique_temp_dir("codex-sqlite-home");
+        fs::create_dir_all(&codex_home).expect("create codex home");
+        fs::create_dir_all(&sqlite_home).expect("create sqlite home");
+        fs::write(
+            codex_home.join("config.toml"),
+            format!("sqlite_home = {:?}\n", sqlite_home.display().to_string()),
+        )
+        .expect("write config");
+
+        let state_db = sqlite_home.join("state_1.sqlite");
+        let connection = Connection::open(&state_db).expect("open test sqlite");
+        connection
+            .execute_batch(
+                "create table threads (
+                    id text primary key,
+                    created_at integer not null,
+                    updated_at integer not null,
+                    tokens_used integer not null default 0,
+                    model text,
+                    cwd text not null default '',
+                    title text not null default '',
+                    first_user_message text not null default ''
+                );
+                insert into threads (
+                    id, created_at, updated_at, tokens_used, model, cwd, title, first_user_message
+                ) values (
+                    'thread-from-sqlite-home', 1774440000, 1774440300, 12345, 'gpt-5.4',
+                    '/tmp/workspace', 'SQLite Home Session', 'hello'
+                );",
+            )
+            .expect("seed test sqlite");
+        drop(connection);
+
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let report = collect_codex().expect("collect codex report");
+
+        if let Some(value) = previous_codex_home {
+            std::env::set_var("CODEX_HOME", value);
+        } else {
+            std::env::remove_var("CODEX_HOME");
+        }
+
+        fs::remove_dir_all(&codex_home).ok();
+        fs::remove_dir_all(&sqlite_home).ok();
+
+        assert_eq!(report.status.session_count, Some(1));
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].summary.id, "thread-from-sqlite-home");
     }
 }

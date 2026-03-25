@@ -1,32 +1,51 @@
 # Burned
 
-Burned is a desktop-first usage observability app focused on Codex and Claude Code. It indexes local sessions from those two sources and exposes a stable usage layer for daily token and cost tracking.
+[简体中文](./README.zh-CN.md)
 
-## Recommended Stack
+Burned is a local usage dashboard for Codex and Claude Code.
 
-- `Tauri 2`: native desktop shell with low memory overhead and direct access to the local machine
-- `React + TypeScript + Vite`: fast UI iteration for the dashboard and source setup flows
-- `Rust backend`: source adapters, filesystem scanning, and SQLite writes
-- `SQLite`: local usage ledger, session index, and aggregation store
+It reads local session data, turns it into a consistent usage layer, and lets you see token and cost trends without digging through tool-specific storage.
 
-This repository starts with a desktop shell, a product-shaped dashboard, and a Rust command surface centered on two trustworthy local adapters.
+## What It Does
 
-## Getting Started
+- Read local sessions from `Codex` and `Claude Code`.
+- Show daily tokens, cost, recent sessions, and source-level trends in one dashboard.
+- Keep source-native titles and previews so you can quickly find what actually caused a spike.
+- Mark usage as `native`, `derived`, or `estimated` so the numbers have clear provenance.
+- Run locally on your machine instead of sending your session history to a hosted service.
+
+## Supported Sources
+
+- `Codex`
+- `Claude Code`
+
+## Quick Start
+
+Install from npm:
+
+```bash
+npm install -g burned
+burned
+```
+
+Run from source:
 
 ```bash
 pnpm install
-pnpm dev
-pnpm rust:check
-pnpm tauri:dev
-```
-
-To open the browser-based dashboard directly from the workspace:
-
-```bash
+pnpm build
 ./burned
 ```
 
-That command reuses Burned's Rust collectors, serves the built dashboard locally, computes a fresh snapshot, and opens your default browser. If you want a bare `burned` command everywhere, symlink this launcher into a directory that is already on your `PATH`.
+On first run, Burned builds the `burned-web` Rust binary locally, so you need a working Rust toolchain on `PATH`.
+
+## Development
+
+```bash
+pnpm dev
+pnpm rust:check
+pnpm tauri:dev
+pnpm test
+```
 
 For quick local control while iterating on the browser-mode app:
 
@@ -37,25 +56,7 @@ For quick local control while iterating on the browser-mode app:
 ./burned.sh stop
 ```
 
-## Installable CLI Package
-
-Burned now exposes an npm-style CLI entrypoint:
-
-```bash
-pnpm pack
-pnpm add -g ./burned-0.1.0.tgz
-burned
-```
-
-You can also run the packed tarball without a global install:
-
-```bash
-npm exec --yes --package=./burned-0.1.0.tgz burned
-```
-
-The package is source-visible and ships the built frontend with the Rust source. On first run it builds the `burned-web` Rust binary into `~/.burned/cargo-target`, so a working Rust toolchain must be available on `PATH`.
-
-Release helpers also live at the project root now:
+## Release
 
 ```bash
 ./release.sh patch
@@ -63,16 +64,6 @@ Release helpers also live at the project root now:
 ./release.sh major
 ```
 
-## Initial Product Boundary
+## Community support
 
-- index sessions from Codex and Claude Code without forcing one transcript schema
-- extract or recompute per-session usage from those two local sources
-- classify usage as `native`, `derived`, or `estimated`
-- aggregate daily totals by source, model, and workspace
-
-## Next Steps
-
-1. Add SQLite migrations and a persistent usage ledger in Rust.
-2. Keep Codex and Claude Code analytics internally consistent as the snapshot model grows.
-3. Implement session recomputation and source health diagnostics.
-4. Add source onboarding and workspace-level filters.
+Many thanks to the linux.do community; it's a very loving and professional community.

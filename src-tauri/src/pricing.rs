@@ -312,11 +312,13 @@ fn pricing_for_model(model: &str, long_context_session: bool) -> Option<ModelPri
         .find(|(name, _)| *name == model)
         .map(|(_, pricing)| *pricing)?;
 
-    Some(if long_context_session && supports_long_context_pricing(model) {
-        pricing.with_long_context_uplift()
-    } else {
-        pricing
-    })
+    Some(
+        if long_context_session && supports_long_context_pricing(model) {
+            pricing.with_long_context_uplift()
+        } else {
+            pricing
+        },
+    )
 }
 
 fn normalize_openai_model(model: &str) -> Option<&'static str> {
@@ -384,8 +386,14 @@ mod tests {
 
     #[test]
     fn normalizes_openai_and_anthropic_aliases() {
-        assert_eq!(normalize_model_name("gpt-5-4-thinking").as_deref(), Some("gpt-5.4"));
-        assert_eq!(normalize_model_name("gpt-5-2-codex").as_deref(), Some("gpt-5.2-codex"));
+        assert_eq!(
+            normalize_model_name("gpt-5-4-thinking").as_deref(),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            normalize_model_name("gpt-5-2-codex").as_deref(),
+            Some("gpt-5.2-codex")
+        );
         assert_eq!(
             normalize_model_name("anthropic/claude-sonnet-4.6").as_deref(),
             Some("claude-sonnet-4.6")

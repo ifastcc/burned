@@ -80,25 +80,7 @@ type CopyPack = {
     empty: string;
   };
   connectors: {
-    healthKicker: string;
-    healthTitle: string;
-    healthSummary: (connected: number, ready: number, partial: number) => string;
-    surfaceKicker: string;
-    surfaceTitle: string;
-    surfaceSummary: string;
-    sessionCount: string;
     lastSeen: string;
-    pending: string;
-    backupTitle: string;
-    backupSummary: string;
-    backupLabel: string;
-    backupPlaceholder: string;
-    backupSave: string;
-    backupClear: string;
-    backupSaved: string;
-    backupCleared: string;
-    backupSaveFailed: string;
-    backupClearFailed: string;
   };
   common: {
     ready: string;
@@ -204,28 +186,7 @@ const copies: Record<Locale, CopyPack> = {
       empty: "No sessions indexed yet for this connector."
     },
     connectors: {
-      healthKicker: "Connector health",
-      healthTitle: "Technical connector detail",
-      healthSummary: (connected, ready, partial) =>
-        `${connected} visible connectors · ${ready} ready · ${partial} partial`,
-      surfaceKicker: "Connector surface",
-      surfaceTitle: "What Burned can see right now",
-      surfaceSummary:
-        "Native token ingestion is live where the source writes stable usage.",
-      sessionCount: "Sessions",
       lastSeen: "Last seen",
-      pending: "pending",
-      backupTitle: "Cherry backup directory",
-      backupSummary:
-        "Save this once so Burned can reuse Cherry Studio backup exports when the local History API is unavailable.",
-      backupLabel: "Backup directory",
-      backupPlaceholder: "/Users/you/Documents/cherry_data_backup",
-      backupSave: "Save",
-      backupClear: "Clear",
-      backupSaved: "Backup directory saved.",
-      backupCleared: "Backup directory cleared.",
-      backupSaveFailed: "Could not save the backup directory.",
-      backupClearFailed: "Could not clear the backup directory."
     },
     common: {
       ready: "ready",
@@ -326,27 +287,7 @@ const copies: Record<Locale, CopyPack> = {
       empty: "这个 connector 下面还没有索引到 session。"
     },
     connectors: {
-      healthKicker: "连接器健康度",
-      healthTitle: "技术细节",
-      healthSummary: (connected, ready, partial) =>
-        `${connected} 个可见连接器 · ${ready} 个就绪 · ${partial} 个部分可用`,
-      surfaceKicker: "连接器表面",
-      surfaceTitle: "Burned 当前能看到什么",
-      surfaceSummary: "只要来源写出了稳定 usage，原生 token 接入就能生效。",
-      sessionCount: "Session",
       lastSeen: "最近看到",
-      pending: "待定",
-      backupTitle: "Cherry 备份目录",
-      backupSummary:
-        "只要保存一次，Burned 以后就能在本地 History API 不可用时继续复用 Cherry Studio 的备份导出。",
-      backupLabel: "备份目录",
-      backupPlaceholder: "/Users/you/Documents/cherry_data_backup",
-      backupSave: "保存",
-      backupClear: "清空",
-      backupSaved: "备份目录已保存。",
-      backupCleared: "备份目录已清空。",
-      backupSaveFailed: "保存备份目录失败。",
-      backupClearFailed: "清空备份目录失败。"
     },
     common: {
       ready: "就绪",
@@ -428,14 +369,6 @@ export function formatPercent(value: number, locale: Locale) {
   }).format(value);
 }
 
-export function formatCurrency(value: number, locale: Locale) {
-  return new Intl.NumberFormat(localeTag(locale), {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 2
-  }).format(value);
-}
-
 function parseDateInput(value: string) {
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(value)
     ? new Date(`${value}T12:00:00`)
@@ -446,23 +379,6 @@ function parseDateInput(value: string) {
   }
 
   return parsed;
-}
-
-export function formatLocalizedDate(isoDate: string | undefined, locale: Locale) {
-  if (!isoDate) {
-    return null;
-  }
-
-  const parsed = parseDateInput(isoDate);
-  if (!parsed) {
-    return null;
-  }
-
-  return new Intl.DateTimeFormat(localeTag(locale), {
-    year: "numeric",
-    month: "long",
-    day: "numeric"
-  }).format(parsed);
 }
 
 export function formatLocalizedDateTime(isoDateTime: string | undefined, locale: Locale) {

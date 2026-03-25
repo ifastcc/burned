@@ -1,6 +1,6 @@
 # Burned
 
-Burned is a desktop-first usage observability app for AI tooling. It is designed to index local sessions from multiple tools, preserve raw artifacts per source, and expose a stable usage layer for daily token and cost tracking.
+Burned is a desktop-first usage observability app focused on Codex and Claude Code. It indexes local sessions from those two sources and exposes a stable usage layer for daily token and cost tracking.
 
 ## Recommended Stack
 
@@ -9,7 +9,7 @@ Burned is a desktop-first usage observability app for AI tooling. It is designed
 - `Rust backend`: source adapters, filesystem scanning, and SQLite writes
 - `SQLite`: local usage ledger, session index, and aggregation store
 
-This repository starts with a desktop shell, a product-shaped dashboard, and a minimal Rust command surface that will later be backed by real adapters and persistence.
+This repository starts with a desktop shell, a product-shaped dashboard, and a Rust command surface centered on two trustworthy local adapters.
 
 ## Getting Started
 
@@ -50,18 +50,10 @@ burned
 You can also run the packed tarball without a global install:
 
 ```bash
-npm exec --yes --package=./burned-0.1.0.tgz burned -- config show
+npm exec --yes --package=./burned-0.1.0.tgz burned
 ```
 
 The package is source-visible and ships the built frontend with the Rust source. On first run it builds the `burned-web` Rust binary into `~/.burned/cargo-target`, so a working Rust toolchain must be available on `PATH`.
-
-Cherry Studio backup directory configuration is persistent:
-
-```bash
-./burned config show
-./burned config set cherry-backup-dir "/Users/you/Documents/cherry_data_backup"
-./burned config clear cherry-backup-dir
-```
 
 Release helpers also live at the project root now:
 
@@ -73,20 +65,14 @@ Release helpers also live at the project root now:
 
 ## Initial Product Boundary
 
-- index sessions from many AI tools without forcing one transcript schema
-- extract or recompute per-session usage when possible
+- index sessions from Codex and Claude Code without forcing one transcript schema
+- extract or recompute per-session usage from those two local sources
 - classify usage as `native`, `derived`, or `estimated`
 - aggregate daily totals by source, model, and workspace
 
 ## Next Steps
 
 1. Add SQLite migrations and a persistent usage ledger in Rust.
-2. Build connector adapters for Codex, Claude Code, Cursor, Cline, Cherry Studio, and LobeHub.
+2. Keep Codex and Claude Code analytics internally consistent as the snapshot model grows.
 3. Implement session recomputation and source health diagnostics.
 4. Add source onboarding and workspace-level filters.
-
-## Cherry Studio Compatibility
-
-- Prefer the local History API when it is available.
-- Fall back to `agents.db` for agent sessions.
-- Fall back again to legacy Cherry backup zips that include `data.json`, which can restore ordinary topic metadata and token usage without the History API.

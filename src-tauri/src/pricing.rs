@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn leaves_unknown_models_unpriced() {
         assert_eq!(
-            estimate_cost_usd("cursor-private-model", TokenBreakdown::default()),
+            estimate_cost_usd("private-model", TokenBreakdown::default()),
             None
         );
     }

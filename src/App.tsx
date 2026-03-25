@@ -8,7 +8,6 @@ import type {
   DashboardSnapshot,
   SessionSummary,
   SourceDetailSnapshot,
-  SourceStatus,
   SourceUsage,
 } from "./data/schema";
 import {
@@ -18,7 +17,9 @@ import {
   formatFriendlyNumber,
   formatLocalizedDateTime,
   getCopy,
+  getLocaleLabel,
   sourceStateLabel,
+  supportedLocales,
   type Locale,
 } from "./i18n";
 import "./styles.css";
@@ -588,13 +589,23 @@ function SourceList({
   pricingPending: string;
   onOpenSource: (sourceId: string) => void;
 }) {
-  const maxTokens = Math.max(...sources.map((s) => s.tokens), 1);
+  const maxTokens = Math.max(...sources.map((s) => s.tokens ?? 0), 1);
 
   return (
     <div className="source-list">
       {sources.map((s, i) => {
-        const pct = (s.tokens / maxTokens) * 100;
-        const icon = s.trend === "up" ? "↑" : s.trend === "down" ? "↓" : "→";
+        const tokenValue = s.tokens ?? 0;
+        const pct = s.analyticsState === "ready" ? (tokenValue / maxTokens) * 100 : 0;
+        const icon =
+          s.trend === "up" ? "↑" : s.trend === "down" ? "↓" : s.trend === "flat" ? "→" : null;
+        const statusCopy =
+          s.analyticsState === "session_only" ? "analytics pending" : "data unavailable";
+        const costLabel =
+          s.analyticsState !== "ready"
+            ? statusCopy
+            : s.costUsd != null
+              ? estimatedCost(formatUsd(s.costUsd, locale))
+              : pricingPending;
         return (
           <button
             key={s.sourceId}
@@ -602,59 +613,36 @@ function SourceList({
             className="source-row"
             style={{ animationDelay: `${i * 50}ms` }}
             onClick={() => onOpenSource(s.sourceId)}
-            aria-label={`${s.source} ${formatTokenFigure(s.tokens, locale)}`}
+            aria-label={
+              s.analyticsState === "ready"
+                ? `${s.source} ${formatTokenFigure(tokenValue, locale)}`
+                : `${s.source} ${statusCopy}`
+            }
           >
             <div className="source-main">
               <span className="source-name">{s.source}</span>
-              <span className={`source-cost${s.costUsd > 0 ? "" : " pending"}`}>
-                {s.costUsd > 0
-                  ? estimatedCost(formatUsd(s.costUsd, locale))
-                  : pricingPending}
+              <span className={`source-cost${s.analyticsState === "ready" && s.costUsd != null ? "" : " pending"}`}>
+                {costLabel}
               </span>
             </div>
             <div className="source-bar-bg">
               <div
                 className="source-bar-fill"
                 style={{
-                  width: `${Math.max(pct, 3)}%`,
+                  width: `${s.analyticsState === "ready" ? Math.max(pct, 3) : 0}%`,
                   animationDelay: `${i * 70}ms`,
                 }}
               />
             </div>
             <span className="source-tokens">
-              {formatCompactNumber(s.tokens, locale, 1)}
+              {s.analyticsState === "ready"
+                ? formatCompactNumber(tokenValue, locale, 1)
+                : "—"}
             </span>
-            <span className={`source-trend ${s.trend}`}>{icon}</span>
+            {icon ? <span className={`source-trend ${s.trend}`}>{icon}</span> : null}
           </button>
         );
       })}
-    </div>
-  );
-}
-
-function ConnectorGrid({
-  statuses,
-  locale,
-}: {
-  statuses: SourceStatus[];
-  locale: Locale;
-}) {
-  return (
-    <div className="conn-grid">
-      {statuses.map((st) => (
-        <div key={st.id} className="conn-card">
-          <span className={`conn-dot ${st.state}`} />
-          <div className="conn-info">
-            <span className="conn-name">{st.name}</span>
-            <span className="conn-state">
-              {sourceStateLabel(locale, st.state)}
-            </span>
-          </div>
-          {st.sessionCount != null && (
-            <span className="conn-meta">{st.sessionCount} sess</span>
-          )}
-        </div>
-      ))}
     </div>
   );
 }
@@ -692,6 +680,111 @@ function SessionFeed({
         </div>
       ))}
     </div>
+  );
+}
+
+function analyticsStateText(sc: typeof showcaseCopy["en-US"], state: SourceDetailSnapshot["analyticsState"]) {
+  if (state === "ready") return sc.analyticsReady;
+  if (state === "session_only") return sc.analyticsPending;
+  return sc.analyticsUnavailable;
+}
+
+function pricingCoverageText(
+  copy: ReturnType<typeof getCopy>,
+  coverage: "actual" | "partial" | "pending" | null,
+) {
+  if (coverage === "actual") return copy.common.ready;
+  if (coverage === "partial") return copy.common.partial;
+  if (coverage === "pending") return copy.common.pending;
+  return copy.common.unknown;
+}
+
+function SummaryStrip({
+  locale,
+  sc,
+  estimatedCost,
+  pricingPending,
+  summaries,
+}: {
+  locale: Locale;
+  sc: typeof showcaseCopy["en-US"];
+  estimatedCost: (cost: string) => string;
+  pricingPending: string;
+  summaries: Array<{
+    label: string;
+    summary: SourceDetailSnapshot["todaySummary"];
+  }>;
+}) {
+  return (
+    <section className="source-summary-strip">
+      {summaries.map(({ label, summary }) => (
+        <article className="source-summary-card" key={label}>
+          <span className="source-summary-label">{label}</span>
+          <strong className="source-summary-value">
+            {summary ? formatFriendlyNumber(summary.tokens, locale, 1) : "—"}
+          </strong>
+          <span className={`source-summary-cost${summary?.costUsd != null ? "" : " pending"}`}>
+            {summary == null
+              ? "—"
+              : summary.costUsd != null
+                ? estimatedCost(formatUsd(summary.costUsd, locale))
+                : pricingPending}
+          </span>
+          <div className="source-summary-meta">
+            <span>{sc.summarySessions}: {summary?.sessions ?? 0}</span>
+            <span>{sc.summaryActiveDays}: {summary?.activeDays ?? 0}</span>
+          </div>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function PeriodicBreakdownTables({
+  locale,
+  sc,
+  estimatedCost,
+  pricingPending,
+  snapshot,
+}: {
+  locale: Locale;
+  sc: typeof showcaseCopy["en-US"];
+  estimatedCost: (cost: string) => string;
+  pricingPending: string;
+  snapshot: SourceDetailSnapshot;
+}) {
+  const breakdowns = snapshot.periodicBreakdowns;
+  if (!breakdowns) {
+    return null;
+  }
+
+  const renderTable = (
+    title: string,
+    rows: NonNullable<SourceDetailSnapshot["periodicBreakdowns"]>["weekly"],
+  ) => (
+    <section className="periodic-breakdown">
+      <SectionHeader label={title} />
+      <div className="periodic-breakdown-table">
+        {rows.map((row) => (
+          <div className="periodic-breakdown-row" key={`${title}:${row.startDate}`}>
+            <span>{row.label}</span>
+            <span>{formatFriendlyNumber(row.tokens, locale)}</span>
+            <span className={row.costUsd != null ? "" : "pending"}>
+              {row.costUsd != null
+                ? estimatedCost(formatUsd(row.costUsd, locale))
+                : pricingPending}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+
+  return (
+    <>
+      {renderTable(sc.breakdownWeekly, breakdowns.weekly)}
+      {renderTable(sc.breakdownMonthly, breakdowns.monthly)}
+    </>
   );
 }
 
@@ -733,6 +826,9 @@ function SourceDetailPage({
   const lastSeen =
     formatLocalizedDateTime(snapshot.status.lastSeenAt ?? undefined, locale) ??
     snapshot.status.lastSeenAt;
+  const analyticsState = analyticsStateText(sc, snapshot.analyticsState);
+  const pricingCoverage =
+    snapshot.todaySummary?.pricingCoverage ?? snapshot.last7dSummary?.pricingCoverage ?? null;
   const sourceSummary =
     snapshot.status.note ||
     (lastSeen
@@ -759,9 +855,15 @@ function SourceDetailPage({
               </strong>
             </div>
             <div className="detail-chip">
+              <span className="detail-chip-label">{sc.analyticsState}</span>
+              <strong className="detail-chip-value">
+                {analyticsState}
+              </strong>
+            </div>
+            <div className="detail-chip">
               <span className="detail-chip-label">{sc.pricingCoverage}</span>
               <strong className="detail-chip-value">
-                {calculationLabel(locale, snapshot.calculationMix)}
+                {pricingCoverageText(copy, pricingCoverage)}
               </strong>
             </div>
           </div>
@@ -777,31 +879,65 @@ function SourceDetailPage({
         )}
       </div>
 
-      <WeeklyBurnCard
-        data={snapshot.week}
-        locale={locale}
-        label={sc.last7Days}
-        title={sc.weekFocusTitle}
-        totalLabel={sc.weekTotal}
-        avgDayLabel={sc.avgDay}
-        estimatedCost={estimatedCost}
-        pricingPending={pricingPending}
-      />
+      {snapshot.analyticsState === "ready" ? (
+        <>
+          <SummaryStrip
+            locale={locale}
+            sc={sc}
+            estimatedCost={estimatedCost}
+            pricingPending={pricingPending}
+            summaries={[
+              { label: sc.summaryToday, summary: snapshot.todaySummary },
+              { label: sc.summaryLast7d, summary: snapshot.last7dSummary },
+              { label: sc.summaryLast30d, summary: snapshot.last30dSummary },
+              { label: sc.summaryLifetime, summary: snapshot.lifetimeSummary },
+            ]}
+          />
 
-      <MonthlyTrendCard
-        history={snapshot.dailyHistory}
-        week={snapshot.week}
-        locale={locale}
-        label={sc.trend30d}
-        monthContextLabel={sc.monthContext}
-        monthTotalLabel={sc.monthTotal}
-        monthPeakLabel={sc.monthPeak}
-        monthDeltaText={sc.monthDelta}
-        monthFlatText={sc.monthFlat}
-        avgDayLabel={sc.avgDay}
-        estimatedCost={estimatedCost}
-        pricingPending={pricingPending}
-      />
+          <WeeklyBurnCard
+            data={snapshot.week}
+            locale={locale}
+            label={sc.last7Days}
+            title={sc.weekFocusTitle}
+            totalLabel={sc.weekTotal}
+            avgDayLabel={sc.avgDay}
+            estimatedCost={estimatedCost}
+            pricingPending={pricingPending}
+          />
+
+          <MonthlyTrendCard
+            history={snapshot.dailyHistory}
+            week={snapshot.week}
+            locale={locale}
+            label={sc.trend30d}
+            monthContextLabel={sc.monthContext}
+            monthTotalLabel={sc.monthTotal}
+            monthPeakLabel={sc.monthPeak}
+            monthDeltaText={sc.monthDelta}
+            monthFlatText={sc.monthFlat}
+            avgDayLabel={sc.avgDay}
+            estimatedCost={estimatedCost}
+            pricingPending={pricingPending}
+          />
+
+          <PeriodicBreakdownTables
+            locale={locale}
+            sc={sc}
+            estimatedCost={estimatedCost}
+            pricingPending={pricingPending}
+            snapshot={snapshot}
+          />
+        </>
+      ) : (
+        <section className="source-analytics-callout">
+          <SectionHeader label={analyticsState} />
+          <p className="empty-state">
+            {snapshot.analyticsState === "session_only"
+              ? sc.analyticsPendingMessage
+              : sc.analyticsUnavailableMessage}
+          </p>
+        </section>
+      )}
 
       <section className="sess-section">
         <SectionHeader label={sc.recentSessions} />
@@ -962,22 +1098,19 @@ export default function App() {
           Burned
         </button>
         <div className="topbar-right">
-          <div className="locale-sw" aria-label={copy.app.locale.label}>
-            <button
-              className={`locale-btn${locale === "zh-CN" ? " active" : ""}`}
-              onClick={() => setLocale("zh-CN")}
-              type="button"
+          <label className="locale-sw" aria-label={copy.app.locale.label}>
+            <select
+              className="locale-select"
+              onChange={(event) => setLocale(event.target.value as Locale)}
+              value={locale}
             >
-              {copy.app.locale.chinese}
-            </button>
-            <button
-              className={`locale-btn${locale === "en-US" ? " active" : ""}`}
-              onClick={() => setLocale("en-US")}
-              type="button"
-            >
-              {copy.app.locale.english}
-            </button>
-          </div>
+              {supportedLocales.map((localeCode) => (
+                <option key={localeCode} value={localeCode}>
+                  {getLocaleLabel(localeCode)}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             className="refresh-btn"
             disabled={isRefreshing}
@@ -1057,13 +1190,6 @@ export default function App() {
                 pricingPending={sc.pricingPending}
                 onOpenSource={(sourceId) => navigateToRoute({ kind: "source", sourceId })}
               />
-            </section>
-          )}
-
-          {snapshot.sourceStatuses.length > 0 && (
-            <section className="conn-section">
-              <SectionHeader label={sc.connected} />
-              <ConnectorGrid statuses={snapshot.sourceStatuses} locale={locale} />
             </section>
           )}
 

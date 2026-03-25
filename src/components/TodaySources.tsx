@@ -16,14 +16,14 @@ type TodaySourcesProps = {
 export function TodaySources({ locale, sources }: TodaySourcesProps) {
   const copy = getCopy(locale);
   const visibleSources = [...sources]
-    .filter((source) => source.tokens > 0 || source.sessions > 0)
-    .sort((left, right) => right.tokens - left.tokens);
+    .filter((source) => source.analyticsState === "ready" && ((source.tokens ?? 0) > 0 || (source.sessions ?? 0) > 0))
+    .sort((left, right) => (right.tokens ?? 0) - (left.tokens ?? 0));
 
   if (visibleSources.length === 0) {
     return null;
   }
 
-  const totalTokens = visibleSources.reduce((total, source) => total + source.tokens, 0);
+  const totalTokens = visibleSources.reduce((total, source) => total + (source.tokens ?? 0), 0);
 
   return (
     <section className="panel source-breakdown-panel">
@@ -41,28 +41,30 @@ export function TodaySources({ locale, sources }: TodaySourcesProps) {
 
       <div className="source-breakdown-grid">
         {visibleSources.map((source) => {
-          const share = totalTokens > 0 ? source.tokens / totalTokens : 0;
+          const tokenCount = source.tokens ?? 0;
+          const sessionCount = source.sessions ?? 0;
+          const share = totalTokens > 0 ? tokenCount / totalTokens : 0;
 
           return (
             <article className="source-breakdown-card" key={source.source}>
               <div className="source-meta">
                 <div>
                   <h3>{source.source}</h3>
-                  <p>{copy.trend.sessionsLabel(source.sessions, calculationLabel(locale, source.calculationMix))}</p>
+                  <p>{copy.trend.sessionsLabel(sessionCount, calculationLabel(locale, source.calculationMix))}</p>
                 </div>
-                <span className={`trend-pill trend-${source.trend}`}>{formatPercent(share, locale)}</span>
+                <span className={`trend-pill trend-${source.trend ?? "flat"}`}>{formatPercent(share, locale)}</span>
               </div>
 
               <div className="source-track">
                 <div
                   className="source-fill"
-                  style={{ width: `${Math.max(share * 100, source.tokens > 0 ? 6 : 0)}%` }}
+                  style={{ width: `${Math.max(share * 100, tokenCount > 0 ? 6 : 0)}%` }}
                 />
               </div>
 
               <div className="source-stats">
-                <span>{formatFriendlyNumber(source.tokens, locale)} tokens</span>
-                <span>{formatNumber(source.tokens, locale)}</span>
+                <span>{formatFriendlyNumber(tokenCount, locale)} tokens</span>
+                <span>{formatNumber(tokenCount, locale)}</span>
               </div>
             </article>
           );

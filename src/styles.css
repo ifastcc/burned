@@ -178,31 +178,21 @@ button {
 /* Locale switch */
 .locale-sw {
   display: flex;
-  gap: 2px;
   background: rgba(255, 255, 255, 0.03);
   border-radius: 999px;
-  padding: 2px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
 }
 
-.locale-btn {
+.locale-select {
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.04em;
-  padding: 5px 12px;
+  padding: 7px 18px 7px 0;
   border: none;
-  border-radius: 999px;
   background: transparent;
   color: var(--text-muted);
-  transition: color 140ms ease, background 140ms ease;
-}
-
-.locale-btn:hover {
-  color: var(--text-dim);
-}
-
-.locale-btn.active {
-  background: var(--ember-soft);
-  color: var(--ember);
+  appearance: none;
 }
 
 /* Refresh */
@@ -1022,6 +1012,89 @@ button {
 .source-detail-empty {
   display: grid;
   gap: var(--sp-sm);
+}
+
+.source-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--sp-sm);
+}
+
+.source-summary-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.source-summary-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.source-summary-value {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  line-height: 1;
+  color: var(--text);
+}
+
+.source-summary-cost {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--flame);
+}
+
+.source-summary-cost.pending {
+  color: var(--text-muted);
+}
+
+.source-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.source-analytics-callout {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.periodic-breakdown {
+  display: grid;
+  gap: var(--sp-sm);
+}
+
+.periodic-breakdown-table {
+  display: grid;
+  gap: 8px;
+}
+
+.periodic-breakdown-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--sp-md);
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 120, 50, 0.08);
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.02);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.periodic-breakdown-row .pending {
+  color: var(--text-muted);
 }
 
 @keyframes grow-right {

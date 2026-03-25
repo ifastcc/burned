@@ -5,15 +5,16 @@ type UsageBarsProps = {
   sources: SourceUsage[];
 };
 
-const trendCopy: Record<SourceUsage["trend"], string> = {
+const trendCopy: Record<NonNullable<SourceUsage["trend"]>, string> = {
   up: "Burn is rising",
   flat: "Holding steady",
   down: "Cooling off"
 };
 
 export function UsageBars({ week, sources }: UsageBarsProps) {
+  const readySources = sources.filter((source) => source.analyticsState === "ready");
   const maxTokens = Math.max(1, ...week.map((point) => point.totalTokens));
-  const maxSourceTokens = Math.max(1, ...sources.map((source) => source.tokens));
+  const maxSourceTokens = Math.max(1, ...readySources.map((source) => source.tokens ?? 0));
 
   return (
     <section className="panel panel-grid">
@@ -46,29 +47,29 @@ export function UsageBars({ week, sources }: UsageBarsProps) {
           <h2>Where the burn comes from</h2>
         </div>
         <div className="source-list">
-          {sources.map((source) => (
+          {readySources.map((source) => (
             <div className="source-row" key={source.source}>
               <div className="source-meta">
                 <div>
                   <h3>{source.source}</h3>
                   <p>
-                    {source.sessions} sessions · {source.calculationMix}
+                    {source.sessions ?? 0} sessions · {source.calculationMix}
                   </p>
                 </div>
-                <span className={`trend-pill trend-${source.trend}`}>
-                  {trendCopy[source.trend]}
+                <span className={`trend-pill trend-${source.trend ?? "flat"}`}>
+                  {trendCopy[source.trend ?? "flat"]}
                 </span>
               </div>
               <div className="source-track">
                 <div
                   className="source-fill"
-                  style={{ width: `${(source.tokens / maxSourceTokens) * 100}%` }}
+                  style={{ width: `${((source.tokens ?? 0) / maxSourceTokens) * 100}%` }}
                 />
               </div>
               <div className="source-stats">
-                <span>{(source.tokens / 1000).toFixed(0)}k tokens</span>
+                <span>{((source.tokens ?? 0) / 1000).toFixed(0)}k tokens</span>
                 <span>
-                  {source.costUsd > 0 ? `$${source.costUsd.toFixed(2)}` : "pricing pending"}
+                  {source.costUsd != null ? `$${source.costUsd.toFixed(2)}` : "pricing pending"}
                 </span>
               </div>
             </div>

@@ -1,6 +1,13 @@
 import type { CalculationMethod, SessionSummary, SourceState } from "./data/schema";
 
-export type Locale = "en-US" | "zh-CN";
+export type Locale =
+  | "en-US"
+  | "zh-CN"
+  | "ja-JP"
+  | "ko-KR"
+  | "de-DE"
+  | "fr-FR"
+  | "es-ES";
 export type Granularity = "day" | "week" | "month";
 
 type CopyPack = {
@@ -115,7 +122,7 @@ type CopyPack = {
   };
 };
 
-const copies: Record<Locale, CopyPack> = {
+const copies: Partial<Record<Locale, CopyPack>> = {
   "en-US": {
     app: {
       eyebrow: "Burned / desktop burn tracker",
@@ -364,23 +371,93 @@ const copies: Record<Locale, CopyPack> = {
   }
 };
 
-export function detectInitialLocale(): Locale {
-  if (typeof window !== "undefined") {
-    const stored = window.localStorage.getItem("burned.locale");
-    if (stored === "en-US" || stored === "zh-CN") {
-      return stored;
-    }
+const englishCopy = copies["en-US"];
+if (englishCopy) {
+  copies["ja-JP"] = englishCopy;
+  copies["ko-KR"] = englishCopy;
+  copies["de-DE"] = englishCopy;
+  copies["fr-FR"] = englishCopy;
+  copies["es-ES"] = englishCopy;
+}
 
-    if (window.navigator.language.toLowerCase().startsWith("zh")) {
-      return "zh-CN";
+export const supportedLocales: Locale[] = [
+  "en-US",
+  "zh-CN",
+  "ja-JP",
+  "ko-KR",
+  "de-DE",
+  "fr-FR",
+  "es-ES"
+];
+
+const localeLabels: Record<Locale, string> = {
+  "en-US": "English",
+  "zh-CN": "中文",
+  "ja-JP": "日本語",
+  "ko-KR": "한국어",
+  "de-DE": "Deutsch",
+  "fr-FR": "Français",
+  "es-ES": "Español"
+};
+
+const localeFamilyFallbacks: Record<string, Locale> = {
+  en: "en-US",
+  zh: "zh-CN",
+  ja: "ja-JP",
+  ko: "ko-KR",
+  de: "de-DE",
+  fr: "fr-FR",
+  es: "es-ES"
+};
+
+function isSupportedLocale(value: string | null | undefined): value is Locale {
+  return value != null && supportedLocales.includes(value as Locale);
+}
+
+function resolvePreferredLocale(
+  stored: string | null | undefined,
+  systemLocales: readonly string[],
+): Locale {
+  if (isSupportedLocale(stored)) {
+    return stored;
+  }
+
+  for (const candidate of systemLocales) {
+    if (isSupportedLocale(candidate)) {
+      return candidate;
+    }
+  }
+
+  for (const candidate of systemLocales) {
+    const family = candidate.toLowerCase().split("-")[0];
+    const fallback = localeFamilyFallbacks[family];
+    if (fallback) {
+      return fallback;
     }
   }
 
   return "en-US";
 }
 
+export function detectInitialLocale(): Locale {
+  if (typeof window !== "undefined") {
+    return resolvePreferredLocale(
+      window.localStorage.getItem("burned.locale"),
+      window.navigator.languages.length > 0
+        ? window.navigator.languages
+        : [window.navigator.language],
+    );
+  }
+
+  return "en-US";
+}
+
 export function getCopy(locale: Locale) {
-  return copies[locale];
+  return copies[locale] ?? copies["en-US"]!;
+}
+
+export function getLocaleLabel(locale: Locale) {
+  return localeLabels[locale];
 }
 
 export function localeTag(locale: Locale) {
@@ -484,7 +561,7 @@ export function formatLocalizedDateTime(isoDateTime: string | undefined, locale:
 }
 
 export function sourceStateLabel(locale: Locale, state: SourceState) {
-  return copies[locale].common[state];
+  return getCopy(locale).common[state];
 }
 
 export function calculationLabel(
@@ -492,15 +569,15 @@ export function calculationLabel(
   method: CalculationMethod | "mixed"
 ) {
   if (method === "mixed") {
-    return copies[locale].common.mixed;
+    return getCopy(locale).common.mixed;
   }
 
-  return copies[locale].common[method];
+  return getCopy(locale).common[method];
 }
 
 export function sessionStatusLabel(
   locale: Locale,
   status: SessionSummary["status"]
 ) {
-  return copies[locale].common[status];
+  return getCopy(locale).common[status];
 }

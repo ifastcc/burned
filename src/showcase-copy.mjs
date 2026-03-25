@@ -1,11 +1,9 @@
-export const showcaseCopy = {
-  "en-US": {
+const englishShowcaseCopy = {
     tagline: "How many tokens have you burned today?",
     perHour: "/ hour",
     last7Days: "Last 7 Days",
     weekFocusTitle: "Daily Burn",
     whereItBurns: "Where It Burns",
-    connected: "Connected",
     recentSessions: "Recent Sessions",
     noData: "Waiting for first scan…",
     trend30d: "30-Day Trend",
@@ -23,22 +21,41 @@ export const showcaseCopy = {
     sourceHistory: "Source History",
     backToOverview: "Back to overview",
     sourceState: "Status",
+    analyticsState: "Analytics",
+    analyticsReady: "ready",
+    analyticsPending: "daily analytics pending",
+    analyticsPendingMessage:
+      "Burned can read sessions for this source, but trustworthy day-level analytics are still pending.",
+    analyticsUnavailable: "data unavailable",
+    analyticsUnavailableMessage:
+      "Burned can see this connector, but it does not have a trustworthy session or usage surface yet.",
     pricingCoverage: "Pricing",
     sourceUnavailable: "Source snapshot unavailable",
     noSourceSessions: "No indexed sessions for this source yet",
+    summaryToday: "Today",
+    summaryLast7d: "7D",
+    summaryLast30d: "30D",
+    summaryLifetime: "Lifetime",
+    summarySessions: "Sessions",
+    summaryActiveDays: "Active days",
+    summaryAvgActiveDay: "Avg / active day",
+    summaryTokens: "Tokens",
+    breakdownWeekly: "Recent weeks",
+    breakdownMonthly: "Recent months",
     refresh: "Refresh",
     refreshing: "Scanning…",
     lastScan: (t) => `Last scan ${t}`,
     waitingScan: "Waiting for first scan",
     refreshFailed: "Refresh failed — will retry automatically"
-  },
+};
+
+const zhShowcaseCopy = {
   "zh-CN": {
     tagline: "你今天已经烧掉多少 token？",
     perHour: "/ 小时",
     last7Days: "近 7 天",
     weekFocusTitle: "当日消耗",
     whereItBurns: "烧在哪里",
-    connected: "数据源",
     recentSessions: "最近会话",
     noData: "等待首次扫描…",
     trend30d: "30 天趋势",
@@ -56,13 +73,39 @@ export const showcaseCopy = {
     sourceHistory: "来源历史",
     backToOverview: "返回总览",
     sourceState: "状态",
+    analyticsState: "统计状态",
+    analyticsReady: "就绪",
+    analyticsPending: "日级统计待接入",
+    analyticsPendingMessage: "Burned 已经能读取这个来源的 session，但可信的按天统计还在接入中。",
+    analyticsUnavailable: "数据不可用",
+    analyticsUnavailableMessage: "Burned 看到了这个 connector，但当前还没有可信的 session 或 usage 统计面。",
     pricingCoverage: "计费",
     sourceUnavailable: "这个来源的详情暂时不可用",
     noSourceSessions: "这个来源下面还没有索引到 session",
+    summaryToday: "今天",
+    summaryLast7d: "近 7 天",
+    summaryLast30d: "近 30 天",
+    summaryLifetime: "累计",
+    summarySessions: "Session",
+    summaryActiveDays: "活跃天数",
+    summaryAvgActiveDay: "活跃日均值",
+    summaryTokens: "Tokens",
+    breakdownWeekly: "最近几周",
+    breakdownMonthly: "最近几个月",
     refresh: "刷新",
     refreshing: "扫描中…",
     lastScan: (t) => `上次扫描 ${t}`,
     waitingScan: "等待首次扫描",
     refreshFailed: "刷新失败 · 将自动重试"
   }
+};
+
+export const showcaseCopy = {
+  "en-US": englishShowcaseCopy,
+  "zh-CN": zhShowcaseCopy["zh-CN"],
+  "ja-JP": englishShowcaseCopy,
+  "ko-KR": englishShowcaseCopy,
+  "de-DE": englishShowcaseCopy,
+  "fr-FR": englishShowcaseCopy,
+  "es-ES": englishShowcaseCopy
 };

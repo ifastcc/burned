@@ -112,3 +112,8 @@ test("session summaries carry pricing coverage instead of implying every cost is
   assert.match(schemaSource, /pricingCoverage: PricingCoverage \| null;/);
   assert.match(appSource, /pricingCoverageText\(copy, s\.pricingCoverage/);
 });
+
+test("session feed no longer treats priced zero-dollar sessions as pending", () => {
+  assert.match(appSource, /showPending \? pricingPending : estimatedCost\(formatUsd\(s\.costUsd, locale\)\)/);
+  assert.doesNotMatch(appSource, /s\.costUsd > 0 \? estimatedCost\(formatUsd\(s\.costUsd, locale\)\) : pricingPending/);
+});

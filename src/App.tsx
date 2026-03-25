@@ -674,7 +674,7 @@ function SessionFeed({
         const showPending =
           s.pricingCoverage === "pending" || (s.pricingCoverage == null && s.costUsd <= 0);
         const costLabel =
-          s.costUsd > 0 ? estimatedCost(formatUsd(s.costUsd, locale)) : pricingPending;
+          showPending ? pricingPending : estimatedCost(formatUsd(s.costUsd, locale));
 
         return (
           <div key={`${s.sourceId}:${s.id}`} className="sess-item">

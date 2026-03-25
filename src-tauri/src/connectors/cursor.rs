@@ -349,12 +349,7 @@ fn cursor_cost_usd(value: &Value) -> f64 {
     let total_cents: i64 = usage_data
         .values()
         .filter_map(|entry| entry.get("costInCents"))
-        .filter_map(|value| match value {
-            Value::Number(number) => number.as_i64(),
-            Value::String(raw) => raw.trim().parse::<i64>().ok(),
-            _ => None,
-        })
-        .filter(|cost_in_cents| *cost_in_cents > 0)
+        .filter_map(cursor_cost_in_cents)
         .sum();
 
     (total_cents as f64) / 100.0
@@ -369,12 +364,7 @@ fn cursor_pricing_coverage(value: &Value) -> Option<PricingCoverage> {
     let priced_entries = usage_data
         .values()
         .filter_map(|entry| entry.get("costInCents"))
-        .filter_map(|value| match value {
-            Value::Number(number) => number.as_i64(),
-            Value::String(raw) => raw.trim().parse::<i64>().ok(),
-            _ => None,
-        })
-        .filter(|cost_in_cents| *cost_in_cents > 0)
+        .filter_map(cursor_cost_in_cents)
         .count();
 
     Some(match priced_entries {
@@ -410,6 +400,16 @@ fn cursor_model_label(value: &Value) -> String {
 fn normalize_model_label(label: &str) -> Option<String> {
     let normalized = normalize_text(label);
     (!normalized.is_empty()).then_some(normalized)
+}
+
+fn cursor_cost_in_cents(value: &Value) -> Option<i64> {
+    let cents = match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(raw) => raw.trim().parse::<i64>().ok(),
+        _ => None,
+    }?;
+
+    (cents >= 0).then_some(cents)
 }
 
 #[cfg(test)]
@@ -620,5 +620,21 @@ mod tests {
         });
 
         assert_eq!(cursor_model_label(&value), "mixed");
+    }
+
+    #[test]
+    fn cursor_pricing_coverage_treats_zero_cost_entries_as_priced() {
+        let value = serde_json::json!({
+            "usageData": {
+                "gpt-4o": { "costInCents": 0 },
+                "claude-3.7-sonnet-thinking": { "costInCents": 7 }
+            }
+        });
+
+        assert!((cursor_cost_usd(&value) - 0.07).abs() < f64::EPSILON);
+        assert_eq!(
+            cursor_pricing_coverage(&value),
+            Some(PricingCoverage::Actual)
+        );
     }
 }

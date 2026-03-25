@@ -30,18 +30,19 @@ struct RawUsage {
 
 impl RawUsage {
     fn token_breakdown(&self) -> TokenBreakdown {
-        let output_tokens = self
-            .output_tokens
-            .saturating_add(self.reasoning_output_tokens);
-        let classified_tokens = self
-            .input_tokens
-            .saturating_add(self.cached_input_tokens)
+        // Codex session JSONL follows the OpenAI usage shape where cached input
+        // and reasoning tokens are detail buckets within the main input/output totals.
+        let cached_input_tokens = self.cached_input_tokens.min(self.input_tokens);
+        let input_tokens = self.input_tokens.saturating_sub(cached_input_tokens);
+        let output_tokens = self.output_tokens;
+        let classified_tokens = input_tokens
+            .saturating_add(cached_input_tokens)
             .saturating_add(output_tokens);
 
         TokenBreakdown {
-            input_tokens: self.input_tokens,
+            input_tokens,
             cache_creation_input_tokens: 0,
-            cached_input_tokens: self.cached_input_tokens,
+            cached_input_tokens,
             output_tokens,
             other_tokens: self.total_tokens.saturating_sub(classified_tokens),
         }
@@ -308,14 +309,19 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
     let output = extract_u64(body, "output_token_count=").unwrap_or(0);
     let cached = extract_u64(body, "cached_token_count=").unwrap_or(0);
     let reasoning = extract_u64(body, "reasoning_token_count=").unwrap_or(0);
-    let tool = extract_u64(body, "tool_token_count=").unwrap_or(0);
-    let token_breakdown = TokenBreakdown {
+    // SQLite logs expose the full token total in `tool_token_count`, despite
+    // the field name. Cached/reasoning counts are detail buckets within the
+    // main input/output totals, just like the session JSONL path.
+    let total = extract_u64(body, "tool_token_count=")
+        .unwrap_or_else(|| input.saturating_add(output));
+    let token_breakdown = RawUsage {
         input_tokens: input,
-        cache_creation_input_tokens: 0,
         cached_input_tokens: cached,
-        output_tokens: output.saturating_add(reasoning),
-        other_tokens: tool,
-    };
+        output_tokens: output,
+        reasoning_output_tokens: reasoning,
+        total_tokens: total,
+    }
+    .token_breakdown();
     let total_tokens = token_breakdown.total_tokens();
     if total_tokens == 0 {
         return None;
@@ -666,7 +672,11 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "thread-123");
-        assert_eq!(events[0].total_tokens, 1950);
+        assert_eq!(events[0].total_tokens, 1700);
+        assert_eq!(events[0].token_breakdown.input_tokens, 1000);
+        assert_eq!(events[0].token_breakdown.cached_input_tokens, 200);
+        assert_eq!(events[0].token_breakdown.output_tokens, 500);
+        assert_eq!(events[0].token_breakdown.other_tokens, 0);
         assert_eq!(
             events[0].occurred_at,
             DateTime::parse_from_rfc3339("2026-03-23T06:41:09.961Z")
@@ -684,9 +694,13 @@ mod tests {
         let events = parse_session_usage_events(contents, "fallback-id");
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].total_tokens, 1950);
+        assert_eq!(events[0].total_tokens, 1700);
         assert_eq!(events[1].session_id, "thread-456");
-        assert_eq!(events[1].total_tokens, 1270);
+        assert_eq!(events[1].total_tokens, 1100);
+        assert_eq!(events[1].token_breakdown.input_tokens, 700);
+        assert_eq!(events[1].token_breakdown.cached_input_tokens, 100);
+        assert_eq!(events[1].token_breakdown.output_tokens, 300);
+        assert_eq!(events[1].token_breakdown.other_tokens, 0);
     }
 
     #[test]
@@ -699,8 +713,12 @@ mod tests {
         let events = parse_session_usage_events(contents, "fallback-id");
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].total_tokens, 1950);
-        assert_eq!(events[1].total_tokens, 1270);
+        assert_eq!(events[0].total_tokens, 1700);
+        assert_eq!(events[1].total_tokens, 1100);
+        assert_eq!(events[1].token_breakdown.input_tokens, 700);
+        assert_eq!(events[1].token_breakdown.cached_input_tokens, 100);
+        assert_eq!(events[1].token_breakdown.output_tokens, 300);
+        assert_eq!(events[1].token_breakdown.other_tokens, 0);
     }
 
     #[test]
@@ -727,5 +745,25 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].model, "gpt-5.4");
         assert!(events[0].estimated_cost_usd().is_some());
+    }
+
+    #[test]
+    fn parses_sqlite_log_usage_without_double_counting_detail_buckets() {
+        let body = "conversation.id=thread-log \
+event.timestamp=2026-03-23T06:41:09.961Z \
+input_token_count=1200 \
+cached_token_count=200 \
+output_token_count=500 \
+reasoning_token_count=50 \
+tool_token_count=1700";
+
+        let event = parse_usage_event(0, body).expect("log usage event");
+
+        assert_eq!(event.session_id, "thread-log");
+        assert_eq!(event.total_tokens, 1700);
+        assert_eq!(event.token_breakdown.input_tokens, 1000);
+        assert_eq!(event.token_breakdown.cached_input_tokens, 200);
+        assert_eq!(event.token_breakdown.output_tokens, 500);
+        assert_eq!(event.token_breakdown.other_tokens, 0);
     }
 }

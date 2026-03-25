@@ -1,8 +1,5 @@
-pub mod antigravity;
-pub mod cherry_studio;
 pub mod claude_code;
 pub mod codex;
-pub mod cursor;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -56,7 +53,8 @@ impl UsageEvent {
 }
 
 pub fn source_supports_estimated_cost(source_id: &str) -> bool {
-    !matches!(source_id, "cursor" | "antigravity")
+    let _ = source_id;
+    true
 }
 
 #[derive(Clone)]
@@ -106,12 +104,6 @@ fn default_connectors() -> Vec<(&'static str, Box<dyn SourceConnector>)> {
     vec![
         ("Codex", Box::new(codex::CodexConnector)),
         ("Claude Code", Box::new(claude_code::ClaudeCodeConnector)),
-        (
-            "Cherry Studio",
-            Box::new(cherry_studio::CherryStudioConnector),
-        ),
-        ("Cursor", Box::new(cursor::CursorConnector)),
-        ("Antigravity", Box::new(antigravity::AntigravityConnector)),
     ]
 }
 

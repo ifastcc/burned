@@ -1,7 +1,6 @@
 mod connectors;
 mod models;
 mod pricing;
-mod settings;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -16,7 +15,6 @@ use models::{
     PeriodicBreakdowns, PricingCoverage, SessionGroup, SessionSummary, SourceDetailSnapshot,
     SourceStatus, SourceUsage, UsageWindowSummary, WindowDelta,
 };
-pub use settings::AppSettings;
 
 #[tauri::command]
 fn get_dashboard_snapshot() -> DashboardSnapshot {
@@ -26,21 +24,6 @@ fn get_dashboard_snapshot() -> DashboardSnapshot {
 #[tauri::command]
 fn get_source_snapshot(source_id: String) -> Result<SourceDetailSnapshot, String> {
     build_source_snapshot(&source_id)
-}
-
-#[tauri::command]
-fn get_app_settings() -> AppSettings {
-    settings::load_app_settings().unwrap_or_default()
-}
-
-#[tauri::command]
-fn set_cherry_backup_dir(path: String) -> Result<AppSettings, String> {
-    settings::set_cherry_backup_dir(&path).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn clear_cherry_backup_dir() -> Result<AppSettings, String> {
-    settings::clear_cherry_backup_dir().map_err(|error| error.to_string())
 }
 
 pub fn build_dashboard_snapshot() -> DashboardSnapshot {
@@ -253,22 +236,6 @@ pub fn set_scan_detail_hook(
     hook: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
 ) {
     connectors::set_scan_detail_hook(hook);
-}
-
-pub fn load_app_settings_json() -> JsonResult<String> {
-    serde_json::to_string(&settings::load_app_settings().unwrap_or_default())
-}
-
-pub fn load_app_settings() -> AppSettings {
-    settings::load_app_settings().unwrap_or_default()
-}
-
-pub fn update_cherry_backup_dir(path: String) -> Result<AppSettings, String> {
-    settings::set_cherry_backup_dir(&path).map_err(|error| error.to_string())
-}
-
-pub fn reset_cherry_backup_dir() -> Result<AppSettings, String> {
-    settings::clear_cherry_backup_dir().map_err(|error| error.to_string())
 }
 
 #[derive(Default)]
@@ -514,7 +481,6 @@ fn build_periodic_breakdowns(
 
     PeriodicBreakdowns { weekly, monthly }
 }
-
 fn build_weekly_usage(
     usage_events: &[&connectors::UsageEvent],
     now: chrono::DateTime<Local>,
@@ -803,10 +769,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_dashboard_snapshot,
-            get_source_snapshot,
-            get_app_settings,
-            set_cherry_backup_dir,
-            clear_cherry_backup_dir
+            get_source_snapshot
         ])
         .run(tauri::generate_context!())
         .expect("error while running Burned");
@@ -883,9 +846,9 @@ mod tests {
             .expect("local datetime");
         let occurred_at = now.with_timezone(&Utc);
         let report = SourceReport {
-            status: ready_status("cursor", "Cursor"),
+            status: ready_status("claude_code", "Claude Code"),
             usage_events: vec![UsageEvent {
-                source_id: "cursor",
+                source_id: "claude_code",
                 occurred_at,
                 model: "unknown".into(),
                 token_breakdown: TokenBreakdown {
@@ -894,17 +857,17 @@ mod tests {
                 },
                 total_tokens: 8_000,
                 calculation_method: CalculationMethod::Estimated,
-                session_id: "cursor-1".into(),
+                session_id: "claude-session-1".into(),
                 explicit_cost_usd: None,
             }],
             sessions: vec![SessionRecord {
                 updated_at: occurred_at,
                 summary: SessionSummary {
-                    id: "cursor-1".into(),
-                    source_id: "cursor".into(),
+                    id: "claude-session-1".into(),
+                    source_id: "claude_code".into(),
                     title: "Session".into(),
                     preview: "Preview".into(),
-                    source: "Cursor".into(),
+                    source: "Claude Code".into(),
                     workspace: "burned".into(),
                     model: "unknown".into(),
                     started_at: "Mar 24 12:00".into(),
@@ -993,8 +956,9 @@ mod tests {
             .single()
             .expect("local datetime");
         let ready_report = report_with_usage("codex", "Codex", now.with_timezone(&Utc));
-        let session_only_report = report_with_sessions_only("cursor", "Cursor");
-        let unavailable_report = report_without_usage_or_sessions("antigravity", "Antigravity");
+        let session_only_report = report_with_sessions_only("claude_code", "Claude Code");
+        let unavailable_report =
+            report_without_usage_or_sessions("experimental", "Experimental");
 
         let snapshot = build_dashboard_snapshot_from_reports(
             vec![ready_report, session_only_report, unavailable_report],
@@ -1007,11 +971,13 @@ mod tests {
             Some("ready")
         );
         assert_eq!(
-            source_row_json(&json, "cursor").get("analyticsState").and_then(|value| value.as_str()),
+            source_row_json(&json, "claude_code")
+                .get("analyticsState")
+                .and_then(|value| value.as_str()),
             Some("session_only")
         );
         assert_eq!(
-            source_row_json(&json, "antigravity")
+            source_row_json(&json, "experimental")
                 .get("analyticsState")
                 .and_then(|value| value.as_str()),
             Some("unavailable")
@@ -1025,11 +991,11 @@ mod tests {
             .single()
             .expect("local datetime");
         let snapshot = build_dashboard_snapshot_from_reports(
-            vec![report_with_sessions_only("cursor", "Cursor")],
+            vec![report_with_sessions_only("claude_code", "Claude Code")],
             now,
         );
         let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
-        let row = source_row_json(&json, "cursor");
+        let row = source_row_json(&json, "claude_code");
 
         assert!(row.get("tokens").is_some_and(serde_json::Value::is_null));
         assert!(row.get("costUsd").is_some_and(serde_json::Value::is_null));
@@ -1047,9 +1013,9 @@ mod tests {
             .single()
             .expect("local datetime");
         let snapshot = build_source_snapshot_from_reports(
-            &[report_with_sessions_only("cursor", "Cursor")],
+            &[report_with_sessions_only("claude_code", "Claude Code")],
             now,
-            "cursor",
+            "claude_code",
         )
         .expect("source snapshot");
         let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
@@ -1224,8 +1190,7 @@ mod tests {
             usage_events: vec![UsageEvent {
                 source_id: match id {
                     "codex" => "codex",
-                    "cursor" => "cursor",
-                    "antigravity" => "antigravity",
+                    "claude_code" => "claude_code",
                     other => panic!("unsupported source id: {other}"),
                 },
                 occurred_at,

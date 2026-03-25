@@ -26,34 +26,7 @@ fn dispatch() -> Result<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.as_slice() {
         [] => run_server(),
-        [scope, command] if scope == "config" && command == "show" => {
-            println!("{}", burned_lib::load_app_settings_json().context("serialize app settings")?);
-            Ok(())
-        }
-        [scope, command, key, value]
-            if scope == "config" && command == "set" && key == "cherry-backup-dir" =>
-        {
-            let settings =
-                burned_lib::update_cherry_backup_dir(value.to_string()).map_err(anyhow::Error::msg)?;
-            println!(
-                "Saved Cherry Studio backup dir: {}",
-                settings
-                    .cherry_studio
-                    .preferred_backup_dir
-                    .unwrap_or_else(|| "(none)".into())
-            );
-            Ok(())
-        }
-        [scope, command, key]
-            if scope == "config" && command == "clear" && key == "cherry-backup-dir" =>
-        {
-            burned_lib::reset_cherry_backup_dir().map_err(anyhow::Error::msg)?;
-            println!("Cleared Cherry Studio backup dir.");
-            Ok(())
-        }
-        _ => Err(anyhow!(
-            "usage:\n  burned\n  burned config show\n  burned config set cherry-backup-dir <path>\n  burned config clear cherry-backup-dir"
-        )),
+        _ => Err(anyhow!("usage:\n  burned")),
     }
 }
 
@@ -159,7 +132,7 @@ fn find_dist_dir() -> Result<PathBuf> {
 }
 
 fn handle_request(
-    mut request: tiny_http::Request,
+    request: tiny_http::Request,
     dist_dir: &Path,
     initial_snapshot: &Arc<Mutex<Option<String>>>,
 ) -> Result<()> {
@@ -200,74 +173,6 @@ fn handle_request(
                     .context("respond with missing source snapshot")?;
             }
         }
-        return Ok(());
-    }
-
-    if request_path == "/api/settings" {
-        let body = burned_lib::load_app_settings_json().context("serialize app settings")?;
-        let response = Response::from_string(body)
-            .with_status_code(StatusCode(200))
-            .with_header(content_type_header("application/json; charset=utf-8"));
-        request.respond(response).context("respond with settings")?;
-        return Ok(());
-    }
-
-    if request_path == "/api/settings/cherry-backup-dir" && request.method().as_str() == "POST" {
-        let mut body = String::new();
-        request
-            .as_reader()
-            .read_to_string(&mut body)
-            .context("read Cherry backup dir request body")?;
-        let payload: serde_json::Value =
-            serde_json::from_str(&body).context("parse Cherry backup dir payload")?;
-        let path = payload
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| anyhow!("Cherry backup dir payload is missing `path`"))?;
-        let settings = match burned_lib::update_cherry_backup_dir(path.to_string()) {
-            Ok(settings) => settings,
-            Err(error) => {
-                let response = Response::from_string(error)
-                    .with_status_code(StatusCode(400))
-                    .with_header(content_type_header("text/plain; charset=utf-8"));
-                request
-                    .respond(response)
-                    .context("respond with Cherry backup dir validation error")?;
-                return Ok(());
-            }
-        };
-        let response = Response::from_string(
-            serde_json::to_string(&settings).context("serialize updated settings")?,
-        )
-        .with_status_code(StatusCode(200))
-        .with_header(content_type_header("application/json; charset=utf-8"));
-        request
-            .respond(response)
-            .context("respond with updated settings")?;
-        return Ok(());
-    }
-
-    if request_path == "/api/settings/cherry-backup-dir" && request.method().as_str() == "DELETE" {
-        let settings = match burned_lib::reset_cherry_backup_dir() {
-            Ok(settings) => settings,
-            Err(error) => {
-                let response = Response::from_string(error)
-                    .with_status_code(StatusCode(400))
-                    .with_header(content_type_header("text/plain; charset=utf-8"));
-                request
-                    .respond(response)
-                    .context("respond with Cherry backup dir clear error")?;
-                return Ok(());
-            }
-        };
-        let response = Response::from_string(
-            serde_json::to_string(&settings).context("serialize cleared settings")?,
-        )
-        .with_status_code(StatusCode(200))
-        .with_header(content_type_header("application/json; charset=utf-8"));
-        request
-            .respond(response)
-            .context("respond with cleared settings")?;
         return Ok(());
     }
 
@@ -399,8 +304,8 @@ mod tests {
     #[test]
     fn render_progress_line_includes_detail_when_present() {
         assert_eq!(
-            render_progress_line(2, 5, "Cherry Studio", Some("Transcript 4/8")),
-            "[####------] 2/5 Scanning Cherry Studio - Transcript 4/8"
+            render_progress_line(2, 5, "Codex", Some("Session files 4/8")),
+            "[####------] 2/5 Scanning Codex - Session files 4/8"
         );
     }
 }

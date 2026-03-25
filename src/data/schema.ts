@@ -133,14 +133,3 @@ export type SourceDetailSnapshot = {
   dailyHistory: DailyUsagePoint[];
   sessions: SessionSummary[];
 };
-
-export type CherryStudioSettings = {
-  preferredBackupDir?: string | null;
-  knownBackupDirs: string[];
-  lastVerifiedAt?: string | null;
-  lastSuccessArchive?: string | null;
-};
-
-export type AppSettings = {
-  cherryStudio: CherryStudioSettings;
-};

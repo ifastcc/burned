@@ -1,5 +1,7 @@
 export type CalculationMethod = "native" | "derived" | "estimated";
 export type SourceState = "ready" | "partial" | "missing";
+export type AnalyticsState = "ready" | "session_only" | "unavailable";
+export type PricingCoverage = "actual" | "partial" | "pending";
 
 export type DailyUsagePoint = {
   date: string;
@@ -10,13 +12,59 @@ export type DailyUsagePoint = {
   sessionCount: number;
 };
 
+export type PeakUsagePoint = {
+  date: string;
+  totalTokens: number;
+  totalCostUsd: number | null;
+  sessionCount: number;
+};
+
+export type WindowDelta = {
+  tokensDelta: number;
+  tokensPercentChange: number | null;
+};
+
+export type UsageWindowSummary = {
+  tokens: number;
+  costUsd: number | null;
+  sessions: number;
+  pricedSessions: number;
+  pendingPricingSessions: number;
+  activeDays: number;
+  avgPerActiveDay: number;
+  exactShare: number;
+  pricingCoverage: PricingCoverage;
+  peakDay: PeakUsagePoint | null;
+  deltaVsPreviousPeriod: WindowDelta | null;
+};
+
+export type PeriodicBreakdownRow = {
+  label: string;
+  startDate: string;
+  endDate: string;
+  tokens: number;
+  costUsd: number | null;
+  sessions: number;
+  pricedSessions: number;
+  pendingPricingSessions: number;
+  activeDays: number;
+  pricingCoverage: PricingCoverage;
+};
+
+export type PeriodicBreakdowns = {
+  weekly: PeriodicBreakdownRow[];
+  monthly: PeriodicBreakdownRow[];
+};
+
 export type SourceUsage = {
   sourceId: string;
   source: string;
-  tokens: number;
-  costUsd: number;
-  sessions: number;
-  trend: "up" | "flat" | "down";
+  analyticsState: AnalyticsState;
+  tokens: number | null;
+  costUsd: number | null;
+  sessions: number | null;
+  trend: "up" | "flat" | "down" | null;
+  pricingCoverage: PricingCoverage | null;
   calculationMix: CalculationMethod | "mixed";
 };
 
@@ -73,9 +121,13 @@ export type SourceDetailSnapshot = {
   sourceId: string;
   sourceName: string;
   status: SourceStatus;
+  analyticsState: AnalyticsState;
   calculationMix: CalculationMethod | "mixed";
-  todayTokens: number;
-  todayCostUsd: number;
+  todaySummary: UsageWindowSummary | null;
+  last7dSummary: UsageWindowSummary | null;
+  last30dSummary: UsageWindowSummary | null;
+  lifetimeSummary: UsageWindowSummary | null;
+  periodicBreakdowns: PeriodicBreakdowns | null;
   week: DailyUsagePoint[];
   dailyHistory: DailyUsagePoint[];
   sessions: SessionSummary[];

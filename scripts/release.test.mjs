@@ -113,6 +113,136 @@ test("buildClaudeCommitPrompt asks for one conventional commit line from the sta
   assert.match(prompt, /0\.2\.3/);
 });
 
+test("runRelease stops before mutating package.json when npm auth is invalid", async () => {
+  const { runRelease } = await loadReleaseModule();
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "burned-release-auth-"));
+  const packageJsonPath = path.join(tempRoot, "package.json");
+  const initialPackageJson = `${JSON.stringify({ name: "burned", version: "0.2.4" }, null, 2)}\n`;
+  const commandLog = [];
+
+  fs.writeFileSync(packageJsonPath, initialPackageJson);
+
+  const captureCommandImpl = (command, args) => {
+    commandLog.push(["capture", command, args]);
+
+    if (command === "git" && args[0] === "branch") {
+      return { status: 0, stdout: "main", stderr: "" };
+    }
+
+    if (command === "git" && args[0] === "rev-parse" && args.includes("@{upstream}")) {
+      return { status: 0, stdout: "origin/main", stderr: "" };
+    }
+
+    if (command === "npm" && args[0] === "view") {
+      return { status: 0, stdout: "0.2.3", stderr: "" };
+    }
+
+    if (command === "git" && args[0] === "rev-parse" && args.at(-1) === "refs/tags/v0.2.5") {
+      return { status: 1, stdout: "", stderr: "" };
+    }
+
+    if (command === "npm" && args[0] === "whoami") {
+      return { status: 1, stdout: "", stderr: "npm error code E401" };
+    }
+
+    throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
+  };
+
+  const runCommandImpl = async () => {
+    throw new Error("runCommand should not be called when npm auth preflight fails");
+  };
+
+  await assert.rejects(
+    runRelease({
+      rootDir: tempRoot,
+      argv: ["patch"],
+      captureCommandImpl,
+      runCommandImpl,
+      log: () => {}
+    }),
+    /npm authentication failed.*npm login/i
+  );
+
+  assert.equal(fs.readFileSync(packageJsonPath, "utf8"), initialPackageJson);
+  assert.equal(
+    commandLog.some(([kind, command]) => kind === "capture" && command === "npm"),
+    true
+  );
+});
+
+test("runRelease stops before mutating package.json when the npm user does not own the package", async () => {
+  const { runRelease } = await loadReleaseModule();
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "burned-release-owner-"));
+  const packageJsonPath = path.join(tempRoot, "package.json");
+  const initialPackageJson = `${JSON.stringify({ name: "burned", version: "0.2.4" }, null, 2)}\n`;
+
+  fs.writeFileSync(packageJsonPath, initialPackageJson);
+
+  const captureCommandImpl = (command, args) => {
+    if (command === "git" && args[0] === "branch") {
+      return { status: 0, stdout: "main", stderr: "" };
+    }
+
+    if (command === "git" && args[0] === "rev-parse" && args.includes("@{upstream}")) {
+      return { status: 0, stdout: "origin/main", stderr: "" };
+    }
+
+    if (command === "npm" && args[0] === "view") {
+      return { status: 0, stdout: "0.2.3", stderr: "" };
+    }
+
+    if (command === "git" && args[0] === "rev-parse" && args.at(-1) === "refs/tags/v0.2.5") {
+      return { status: 1, stdout: "", stderr: "" };
+    }
+
+    if (command === "npm" && args[0] === "whoami") {
+      return { status: 0, stdout: "kbaicai", stderr: "" };
+    }
+
+    if (command === "npm" && args[0] === "owner" && args[1] === "ls") {
+      return { status: 0, stdout: "ifastcc <ifastcc2025@gmail.com>", stderr: "" };
+    }
+
+    throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
+  };
+
+  const runCommandImpl = async () => {
+    throw new Error("runCommand should not be called when owner preflight fails");
+  };
+
+  await assert.rejects(
+    runRelease({
+      rootDir: tempRoot,
+      argv: ["patch"],
+      captureCommandImpl,
+      runCommandImpl,
+      log: () => {}
+    }),
+    /not listed as an owner/i
+  );
+
+  assert.equal(fs.readFileSync(packageJsonPath, "utf8"), initialPackageJson);
+});
+
+test("describeNpmPublishFailure turns registry 404s into a publish-permission hint", async () => {
+  const { describeNpmPublishFailure } = await loadReleaseModule();
+
+  const error = describeNpmPublishFailure({
+    packageName: "burned",
+    publishedVersion: "0.2.3",
+    npmUser: "kbaicai",
+    packageOwners: ["ifastcc"],
+    stderr: [
+      "npm error code E404",
+      "npm error 404 Not Found - PUT https://registry.npmjs.org/burned - Not found"
+    ].join("\n")
+  });
+
+  assert.match(error.message, /cannot publish the existing npm package/i);
+  assert.match(error.message, /Current npm user: kbaicai/);
+  assert.match(error.message, /Known owners: ifastcc/);
+});
+
 test("release.sh exists as an executable wrapper around the node release flow", () => {
   assert.equal(fs.existsSync(legacyReleaseShellPath), false);
   assert.equal(fs.existsSync(releaseShellPath), true);

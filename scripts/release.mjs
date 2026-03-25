@@ -121,12 +121,27 @@ export function buildClaudeCommitPrompt(version, diffSummary = "") {
 
 function runCommand(command, args, { cwd, env = process.env, stdio = "inherit" } = {}) {
   return new Promise((resolve, reject) => {
+    const captureOutput = stdio === "capture";
+    let stdout = "";
+    let stderr = "";
     const child = spawn(command, args, {
       cwd,
       env,
-      stdio,
+      stdio: captureOutput ? ["inherit", "pipe", "pipe"] : stdio,
       shell: process.platform === "win32"
     });
+
+    if (captureOutput) {
+      child.stdout?.on("data", (chunk) => {
+        stdout += chunk.toString();
+        process.stdout.write(chunk);
+      });
+
+      child.stderr?.on("data", (chunk) => {
+        stderr += chunk.toString();
+        process.stderr.write(chunk);
+      });
+    }
 
     child.on("error", reject);
     child.on("exit", (code, signal) => {
@@ -136,7 +151,12 @@ function runCommand(command, args, { cwd, env = process.env, stdio = "inherit" }
       }
 
       if (code !== 0) {
-        reject(new Error(`${command} exited with code ${code ?? "unknown"}`));
+        const details = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
+        const error = new Error(details || `${command} exited with code ${code ?? "unknown"}`);
+        error.stdout = stdout.trim();
+        error.stderr = stderr.trim();
+        error.exitCode = code ?? null;
+        reject(error);
         return;
       }
 
@@ -179,8 +199,8 @@ function writePackageJson(packageJsonPath, packageJson) {
   fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
 }
 
-function resolveCurrentBranch(rootDir) {
-  const { stdout } = captureCommand("git", ["branch", "--show-current"], { cwd: rootDir });
+function resolveCurrentBranch(rootDir, captureCommandImpl = captureCommand) {
+  const { stdout } = captureCommandImpl("git", ["branch", "--show-current"], { cwd: rootDir });
   if (!stdout) {
     throw new Error("Release must run from a named git branch.");
   }
@@ -188,8 +208,8 @@ function resolveCurrentBranch(rootDir) {
   return stdout;
 }
 
-function hasUpstream(rootDir) {
-  const result = captureCommand(
+function hasUpstream(rootDir, captureCommandImpl = captureCommand) {
+  const result = captureCommandImpl(
     "git",
     ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
     { cwd: rootDir, allowFailure: true }
@@ -198,8 +218,8 @@ function hasUpstream(rootDir) {
   return result.status === 0;
 }
 
-function ensureTagIsAvailable(rootDir, tagName) {
-  const result = captureCommand(
+function ensureTagIsAvailable(rootDir, tagName, captureCommandImpl = captureCommand) {
+  const result = captureCommandImpl(
     "git",
     ["rev-parse", "-q", "--verify", `refs/tags/${tagName}`],
     { cwd: rootDir, allowFailure: true }
@@ -210,8 +230,8 @@ function ensureTagIsAvailable(rootDir, tagName) {
   }
 }
 
-async function resolvePublishedVersion(packageName, rootDir) {
-  const result = captureCommand("npm", ["view", packageName, "version"], {
+async function resolvePublishedVersion(packageName, rootDir, captureCommandImpl = captureCommand) {
+  const result = captureCommandImpl("npm", ["view", packageName, "version"], {
     cwd: rootDir,
     allowFailure: true
   });
@@ -231,19 +251,19 @@ function truncateForPrompt(text, maxChars = MAX_PROMPT_DIFF_CHARS) {
   return `${text.slice(0, maxChars)}\n\n[diff truncated]`;
 }
 
-function readStagedDiffSummary(rootDir) {
-  const stat = captureCommand("git", ["diff", "--cached", "--stat", "--no-ext-diff"], {
+function readStagedDiffSummary(rootDir, captureCommandImpl = captureCommand) {
+  const stat = captureCommandImpl("git", ["diff", "--cached", "--stat", "--no-ext-diff"], {
     cwd: rootDir
   }).stdout;
-  const diff = captureCommand("git", ["diff", "--cached", "--no-ext-diff", "--unified=0"], {
+  const diff = captureCommandImpl("git", ["diff", "--cached", "--no-ext-diff", "--unified=0"], {
     cwd: rootDir
   }).stdout;
 
   return truncateForPrompt([stat, diff].filter(Boolean).join("\n\n"));
 }
 
-function tryGenerateClaudeCommitMessage(rootDir, version, env) {
-  const prompt = buildClaudeCommitPrompt(version, readStagedDiffSummary(rootDir));
+function tryGenerateClaudeCommitMessage(rootDir, version, env, captureCommandImpl = captureCommand) {
+  const prompt = buildClaudeCommitPrompt(version, readStagedDiffSummary(rootDir, captureCommandImpl));
 
   try {
     const result = spawnSync("claude", ["-p", prompt], {
@@ -264,52 +284,157 @@ function tryGenerateClaudeCommitMessage(rootDir, version, env) {
   }
 }
 
+export function parseNpmOwnerUsernames(ownerListing = "") {
+  return ownerListing
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(/\s+/)[0]);
+}
+
+export function ensureNpmPublishPreflight({
+  packageName,
+  publishedVersion,
+  rootDir,
+  captureCommandImpl = captureCommand
+}) {
+  const whoamiResult = captureCommandImpl("npm", ["whoami"], {
+    cwd: rootDir,
+    allowFailure: true
+  });
+
+  if (whoamiResult.status !== 0 || !whoamiResult.stdout) {
+    throw new Error(
+      `npm authentication failed for ${packageName}. Run 'npm login' or refresh the token in ~/.npmrc before releasing.`
+    );
+  }
+
+  const npmUser = whoamiResult.stdout.split(/\s+/)[0];
+
+  if (!publishedVersion) {
+    return { npmUser, packageOwners: [] };
+  }
+
+  const ownerResult = captureCommandImpl("npm", ["owner", "ls", packageName], {
+    cwd: rootDir,
+    allowFailure: true
+  });
+
+  if (ownerResult.status !== 0 || !ownerResult.stdout) {
+    throw new Error(
+      `Unable to verify npm ownership for ${packageName}. Run 'npm owner ls ${packageName}' and confirm that ${npmUser} can publish it before releasing.`
+    );
+  }
+
+  const packageOwners = parseNpmOwnerUsernames(ownerResult.stdout);
+
+  if (!packageOwners.includes(npmUser)) {
+    throw new Error(
+      `npm user ${npmUser} is not listed as an owner for ${packageName}. Known owners: ${packageOwners.join(", ")}. Publish with an authorized npm account or add this user as an owner first.`
+    );
+  }
+
+  return { npmUser, packageOwners };
+}
+
+export function describeNpmPublishFailure({
+  packageName,
+  publishedVersion,
+  npmUser,
+  packageOwners = [],
+  stderr = "",
+  message = ""
+}) {
+  const combined = [message, stderr].filter(Boolean).join("\n");
+
+  if (/E401|401 Unauthorized/i.test(combined)) {
+    return new Error(
+      `npm publish failed for ${packageName}: registry authentication was rejected. Run 'npm login' or refresh the token in ~/.npmrc, then retry.`
+    );
+  }
+
+  if (publishedVersion && /E403|403 Forbidden|E404|404 Not Found/i.test(combined)) {
+    const ownerSummary = packageOwners.length > 0 ? packageOwners.join(", ") : "(unknown)";
+    return new Error(
+      `npm publish failed for ${packageName}: the current account cannot publish the existing npm package. Current npm user: ${npmUser ?? "(unknown)"}. Known owners: ${ownerSummary}.`
+    );
+  }
+
+  return new Error(combined || `npm publish failed for ${packageName}.`);
+}
+
 export async function runRelease({
   rootDir,
   argv = process.argv.slice(2),
-  env = process.env
+  env = process.env,
+  captureCommandImpl = captureCommand,
+  runCommandImpl = runCommand,
+  log = console.log
 }) {
   const releaseType = resolveReleaseType(argv[0]);
 
-  const branch = resolveCurrentBranch(rootDir);
-  const upstreamPresent = hasUpstream(rootDir);
+  const branch = resolveCurrentBranch(rootDir, captureCommandImpl);
+  const upstreamPresent = hasUpstream(rootDir, captureCommandImpl);
   const { packageJsonPath, packageJson } = readPackageJson(rootDir);
-  const publishedVersion = await resolvePublishedVersion(packageJson.name, rootDir);
+  const publishedVersion = await resolvePublishedVersion(
+    packageJson.name,
+    rootDir,
+    captureCommandImpl
+  );
+  const { npmUser, packageOwners } = ensureNpmPublishPreflight({
+    packageName: packageJson.name,
+    publishedVersion,
+    rootDir,
+    captureCommandImpl
+  });
   const baseVersion = selectReleaseBaseVersion(packageJson.version, publishedVersion);
   const nextVersion = bumpVersion(baseVersion, releaseType);
   const tagName = `v${nextVersion}`;
 
-  ensureTagIsAvailable(rootDir, tagName);
+  ensureTagIsAvailable(rootDir, tagName, captureCommandImpl);
 
-  console.log(`Preparing ${packageJson.name}@${nextVersion} from ${branch}`);
+  log(`Preparing ${packageJson.name}@${nextVersion} from ${branch}`);
   if (publishedVersion && publishedVersion !== packageJson.version) {
-    console.log(`npm latest is ${publishedVersion}; release will bump from ${baseVersion}`);
+    log(`npm latest is ${publishedVersion}; release will bump from ${baseVersion}`);
   }
 
-  await runCommand("pnpm", ["test"], { cwd: rootDir, env });
+  await runCommandImpl("pnpm", ["test"], { cwd: rootDir, env });
   packageJson.version = nextVersion;
   writePackageJson(packageJsonPath, packageJson);
-  await runCommand("git", buildStageAllArgs(), { cwd: rootDir, env });
+  await runCommandImpl("git", buildStageAllArgs(), { cwd: rootDir, env });
 
   const commitMessage = resolveCommitMessage({
-    claudeMessage: tryGenerateClaudeCommitMessage(rootDir, nextVersion, env),
+    claudeMessage: tryGenerateClaudeCommitMessage(rootDir, nextVersion, env, captureCommandImpl),
     version: nextVersion
   });
 
   if (commitMessage === fallbackReleaseCommitMessage(nextVersion)) {
-    console.log(`Using fallback commit message: ${commitMessage}`);
+    log(`Using fallback commit message: ${commitMessage}`);
   } else {
-    console.log(`Using Claude-generated commit message: ${commitMessage}`);
+    log(`Using Claude-generated commit message: ${commitMessage}`);
   }
 
-  await runCommand("git", ["commit", "-m", commitMessage], { cwd: rootDir, env });
-  await runCommand("git", ["tag", tagName], { cwd: rootDir, env });
-  await runCommand("npm", ["publish"], { cwd: rootDir, env });
-  await runCommand("git", buildPushCommandArgs({ branch, hasUpstream: upstreamPresent }), {
+  await runCommandImpl("git", ["commit", "-m", commitMessage], { cwd: rootDir, env });
+  await runCommandImpl("git", ["tag", tagName], { cwd: rootDir, env });
+
+  try {
+    await runCommandImpl("npm", ["publish"], { cwd: rootDir, env, stdio: "capture" });
+  } catch (error) {
+    throw describeNpmPublishFailure({
+      packageName: packageJson.name,
+      publishedVersion,
+      npmUser,
+      packageOwners,
+      stderr: error?.stderr ?? "",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  await runCommandImpl("git", buildPushCommandArgs({ branch, hasUpstream: upstreamPresent }), {
     cwd: rootDir,
     env
   });
-  await runCommand("git", ["push", DEFAULT_REMOTE, tagName], { cwd: rootDir, env });
+  await runCommandImpl("git", ["push", DEFAULT_REMOTE, tagName], { cwd: rootDir, env });
 }
 
 const currentFilePath = fileURLToPath(import.meta.url);

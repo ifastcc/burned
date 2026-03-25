@@ -631,6 +631,123 @@ mod tests {
         approx_eq(snapshot.sessions[0].cost_usd, expected_cost);
     }
 
+    #[test]
+    fn source_rows_distinguish_ready_session_only_and_unavailable() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let ready_report = report_with_usage("codex", "Codex", now.with_timezone(&Utc));
+        let session_only_report = report_with_sessions_only("cursor", "Cursor");
+        let unavailable_report = report_without_usage_or_sessions("antigravity", "Antigravity");
+
+        let snapshot = build_dashboard_snapshot_from_reports(
+            vec![ready_report, session_only_report, unavailable_report],
+            now,
+        );
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+
+        assert_eq!(
+            source_row_json(&json, "codex").get("analyticsState").and_then(|value| value.as_str()),
+            Some("ready")
+        );
+        assert_eq!(
+            source_row_json(&json, "cursor").get("analyticsState").and_then(|value| value.as_str()),
+            Some("session_only")
+        );
+        assert_eq!(
+            source_row_json(&json, "antigravity")
+                .get("analyticsState")
+                .and_then(|value| value.as_str()),
+            Some("unavailable")
+        );
+    }
+
+    #[test]
+    fn session_only_rows_keep_quantitative_metrics_null() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let snapshot = build_dashboard_snapshot_from_reports(
+            vec![report_with_sessions_only("cursor", "Cursor")],
+            now,
+        );
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let row = source_row_json(&json, "cursor");
+
+        assert!(row.get("tokens").is_some_and(serde_json::Value::is_null));
+        assert!(row.get("costUsd").is_some_and(serde_json::Value::is_null));
+        assert!(row.get("sessions").is_some_and(serde_json::Value::is_null));
+        assert!(row.get("trend").is_some_and(serde_json::Value::is_null));
+        assert!(row
+            .get("pricingCoverage")
+            .is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn source_detail_uses_null_summaries_when_analytics_are_pending() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let snapshot = build_source_snapshot_from_reports(
+            &[report_with_sessions_only("cursor", "Cursor")],
+            now,
+            "cursor",
+        )
+        .expect("source snapshot");
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+
+        assert!(json.get("todaySummary").is_some_and(serde_json::Value::is_null));
+        assert!(json.get("last7dSummary").is_some_and(serde_json::Value::is_null));
+        assert!(json.get("last30dSummary").is_some_and(serde_json::Value::is_null));
+        assert!(json.get("lifetimeSummary").is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn source_detail_preserves_zero_for_ready_but_idle_windows() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let occurred_at = (now - Duration::days(20)).with_timezone(&Utc);
+        let snapshot = build_source_snapshot_from_reports(
+            &[report_with_usage("codex", "Codex", occurred_at)],
+            now,
+            "codex",
+        )
+        .expect("source snapshot");
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+
+        assert_eq!(
+            json.get("last7dSummary")
+                .and_then(|value| value.get("tokens"))
+                .and_then(|value| value.as_u64()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn source_rows_expose_row_level_pricing_coverage() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let snapshot = build_dashboard_snapshot_from_reports(
+            vec![report_with_usage("codex", "Codex", now.with_timezone(&Utc))],
+            now,
+        );
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+
+        assert_eq!(
+            source_row_json(&json, "codex")
+                .get("pricingCoverage")
+                .and_then(|value| value.as_str()),
+            Some("actual")
+        );
+    }
+
     fn ready_status(id: &str, name: &str) -> SourceStatus {
         SourceStatus {
             id: id.into(),
@@ -642,6 +759,102 @@ mod tests {
             session_count: Some(1),
             last_seen_at: None,
         }
+    }
+
+    fn report_with_usage(id: &str, name: &str, occurred_at: chrono::DateTime<Utc>) -> SourceReport {
+        SourceReport {
+            status: ready_status(id, name),
+            usage_events: vec![UsageEvent {
+                source_id: match id {
+                    "codex" => "codex",
+                    "cursor" => "cursor",
+                    "antigravity" => "antigravity",
+                    other => panic!("unsupported source id: {other}"),
+                },
+                occurred_at,
+                model: "gpt-5.4".into(),
+                token_breakdown: TokenBreakdown {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 500,
+                    output_tokens: 250,
+                    ..TokenBreakdown::default()
+                },
+                total_tokens: 1_750,
+                calculation_method: CalculationMethod::Native,
+                session_id: format!("{id}-session"),
+            }],
+            sessions: vec![SessionRecord {
+                updated_at: occurred_at,
+                summary: SessionSummary {
+                    id: format!("{id}-session"),
+                    source_id: id.into(),
+                    title: "Session".into(),
+                    preview: "Preview".into(),
+                    source: name.into(),
+                    workspace: "burned".into(),
+                    model: "gpt-5.4".into(),
+                    started_at: "Mar 24 12:00".into(),
+                    total_tokens: 1_750,
+                    cost_usd: 0.0,
+                    calculation_method: CalculationMethod::Native,
+                    status: "indexed".into(),
+                },
+            }],
+        }
+    }
+
+    fn report_with_sessions_only(id: &str, name: &str) -> SourceReport {
+        let updated_at = Utc
+            .with_ymd_and_hms(2026, 3, 24, 16, 0, 0)
+            .single()
+            .expect("utc datetime");
+        SourceReport {
+            status: ready_status(id, name),
+            usage_events: Vec::new(),
+            sessions: vec![SessionRecord {
+                updated_at,
+                summary: SessionSummary {
+                    id: format!("{id}-session"),
+                    source_id: id.into(),
+                    title: "Session".into(),
+                    preview: "Preview".into(),
+                    source: name.into(),
+                    workspace: "burned".into(),
+                    model: "unknown".into(),
+                    started_at: "Mar 24 12:00".into(),
+                    total_tokens: 0,
+                    cost_usd: 0.0,
+                    calculation_method: CalculationMethod::Estimated,
+                    status: "indexed".into(),
+                },
+            }],
+        }
+    }
+
+    fn report_without_usage_or_sessions(id: &str, name: &str) -> SourceReport {
+        let mut status = ready_status(id, name);
+        status.state = SourceState::Partial;
+        status.session_count = None;
+
+        SourceReport {
+            status,
+            usage_events: Vec::new(),
+            sessions: Vec::new(),
+        }
+    }
+
+    fn source_row_json<'a>(snapshot_json: &'a serde_json::Value, source_id: &str) -> &'a serde_json::Value {
+        snapshot_json
+            .get("sources")
+            .and_then(|value| value.as_array())
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    row.get("sourceId")
+                        .and_then(|value| value.as_str())
+                        == Some(source_id)
+                })
+            })
+            .expect("source row")
     }
 
     fn approx_eq(left: f64, right: f64) {

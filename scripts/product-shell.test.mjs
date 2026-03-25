@@ -10,9 +10,11 @@ const dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = path.join(dirname, "..", "package.json");
 const appPath = path.join(dirname, "..", "src", "App.tsx");
 const schemaPath = path.join(dirname, "..", "src", "data", "schema.ts");
+const i18nPath = path.join(dirname, "..", "src", "i18n.ts");
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
 const appSource = fs.readFileSync(appPath, "utf8");
 const schemaSource = fs.readFileSync(schemaPath, "utf8");
+const i18nSource = fs.readFileSync(i18nPath, "utf8");
 
 test("zh-CN hero copy leads with a punchier today-focused question", () => {
   assert.equal(showcaseCopy["zh-CN"].tagline, "你今天已经烧掉多少 token？");
@@ -82,4 +84,26 @@ test("source rows drill into a dedicated source detail page", () => {
   assert.match(appSource, /function getSourceSnapshot\(/);
   assert.match(appSource, /function SourceDetailPage\(/);
   assert.match(appSource, /window\.history\.pushState/);
+});
+
+test("homepage removes the passive connector grid", () => {
+  assert.doesNotMatch(appSource, /function ConnectorGrid\(/);
+  assert.doesNotMatch(appSource, /SectionHeader label=\{sc\.connected\}/);
+});
+
+test("supported locales scale beyond the current two-option switch", () => {
+  assert.match(i18nSource, /ja-JP/);
+  assert.match(i18nSource, /ko-KR/);
+  assert.match(i18nSource, /de-DE/);
+  assert.match(i18nSource, /fr-FR/);
+  assert.match(i18nSource, /es-ES/);
+});
+
+test("source usage rows and detail snapshots carry analytics-state fields", () => {
+  assert.match(schemaSource, /analyticsState:/);
+  assert.match(schemaSource, /pricingCoverage:/);
+  assert.match(schemaSource, /todaySummary:/);
+  assert.match(schemaSource, /last7dSummary:/);
+  assert.match(schemaSource, /last30dSummary:/);
+  assert.match(schemaSource, /lifetimeSummary:/);
 });

@@ -6,11 +6,10 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
-use crate::connectors::{SessionRecord, SourceConnector, SourceReport, UsageEvent};
+use crate::connectors::{SessionRecord, SourceConnector, SourceReport};
 use crate::models::{
-    CalculationMethod, PricingCoverage, SessionRole, SessionSummary, SourceState, SourceStatus,
+    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
 };
-use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "cursor";
 const SOURCE_NAME: &str = "Cursor";
@@ -44,7 +43,10 @@ fn collect_cursor() -> Result<SourceReport> {
     let Some(root) = cursor_root() else {
         return Ok(missing_report());
     };
+    collect_cursor_at(&root)
+}
 
+fn collect_cursor_at(root: &Path) -> Result<SourceReport> {
     let global_state = root.join("User").join("globalStorage").join("state.vscdb");
     let global_backup = root
         .join("User")
@@ -74,7 +76,7 @@ fn collect_cursor() -> Result<SourceReport> {
         .ok()
         .map(|entries| entries.filter_map(std::result::Result::ok).count() as u32);
     let workspace_map = composer_workspace_map(&workspace_storage);
-    let (sessions, usage_events) = query_sessions(&connection, &workspace_map)?;
+    let sessions = query_sessions(&connection, &workspace_map)?;
 
     Ok(SourceReport {
         status: SourceStatus {
@@ -86,13 +88,12 @@ fn collect_cursor() -> Result<SourceReport> {
                 "session-index".into(),
                 "admin-api-tokens".into(),
             ],
-            note: "Local SQLite history is available. Session titles and previews are parsed from composer data; native token usage should come from the team Admin API."
-                .into(),
+            note: cursor_status_note().into(),
             local_path: Some(display_path(root)),
             session_count: session_count.or(workspace_count),
             last_seen_at: format_mtime(&global_store).ok(),
         },
-        usage_events,
+        usage_events: Vec::new(),
         sessions,
     })
 }
@@ -132,14 +133,14 @@ fn format_mtime(path: &Path) -> Result<String> {
     Ok(modified.format("%Y-%m-%d %H:%M").to_string())
 }
 
-fn display_path(path: PathBuf) -> String {
-    path.display().to_string()
+fn display_path(path: impl AsRef<Path>) -> String {
+    path.as_ref().display().to_string()
 }
 
 fn query_sessions(
     connection: &Connection,
     workspace_map: &std::collections::HashMap<String, String>,
-) -> Result<(Vec<SessionRecord>, Vec<UsageEvent>)> {
+) -> Result<Vec<SessionRecord>> {
     let mut statement = connection.prepare(
         "select key, value from cursorDiskKV where key like 'composerData:%' and value <> ''",
     )?;
@@ -150,7 +151,6 @@ fn query_sessions(
     })?;
 
     let mut sessions = Vec::new();
-    let mut usage_events = Vec::new();
     for row in rows {
         let (key, raw_json) = row?;
         let composer_id = key.trim_start_matches("composerData:").to_string();
@@ -158,192 +158,75 @@ fn query_sessions(
             Ok(value) => value,
             Err(_) => continue,
         };
-        let workspace = workspace_map.get(&composer_id).cloned();
-        if let Some((session, usage_event)) = parse_cursor_session(&composer_id, &value, workspace)
-        {
-            sessions.push(session);
-            if let Some(usage_event) = usage_event {
-                usage_events.push(usage_event);
-            }
-        }
+
+        let created_at = value
+            .get("createdAt")
+            .and_then(Value::as_i64)
+            .and_then(epoch_millis_to_utc)
+            .unwrap_or_else(Utc::now);
+        let updated_at = value
+            .get("lastUpdatedAt")
+            .and_then(Value::as_i64)
+            .and_then(epoch_millis_to_utc)
+            .unwrap_or(created_at);
+        let title = value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(normalize_text)
+            .filter(|text| !text.is_empty())
+            .or_else(|| {
+                value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(normalize_text)
+                    .filter(|text| !text.is_empty())
+            })
+            .unwrap_or_else(|| "Untitled Cursor session".into());
+        let preview = value
+            .get("latestConversationSummary")
+            .and_then(|summary| summary.get("summary"))
+            .and_then(|summary| summary.get("summary"))
+            .and_then(Value::as_str)
+            .map(normalize_text)
+            .filter(|text| !text.is_empty())
+            .or_else(|| {
+                value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(normalize_text)
+                    .filter(|text| !text.is_empty())
+            })
+            .unwrap_or_else(|| "No preview available.".into());
+
+        sessions.push(SessionRecord {
+            updated_at,
+            summary: SessionSummary {
+                id: composer_id.clone(),
+                source_id: SOURCE_ID.into(),
+                title: truncate(&title, 72),
+                preview: truncate(&preview, 180),
+                source: SOURCE_NAME.into(),
+                workspace: workspace_map
+                    .get(&composer_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".into()),
+                model: cursor_model_label(&value),
+                started_at: created_at
+                    .with_timezone(&Local)
+                    .format("%b %-d %H:%M")
+                    .to_string(),
+                total_tokens: cursor_total_tokens(&value),
+                cost_usd: cursor_cost_usd(&value),
+                pricing_coverage: cursor_pricing_coverage(&value),
+                calculation_method: CalculationMethod::Derived,
+                status: "indexed".into(),
+            },
+        });
     }
 
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions.truncate(12);
-    Ok((sessions, usage_events))
-}
-
-fn parse_cursor_session(
-    composer_id: &str,
-    value: &Value,
-    workspace: Option<String>,
-) -> Option<(SessionRecord, Option<UsageEvent>)> {
-    let created_at = value
-        .get("createdAt")
-        .and_then(Value::as_i64)
-        .and_then(epoch_millis_to_utc)
-        .unwrap_or_else(Utc::now);
-    let updated_at = value
-        .get("lastUpdatedAt")
-        .and_then(Value::as_i64)
-        .and_then(epoch_millis_to_utc)
-        .unwrap_or(created_at);
-    let title = value
-        .get("name")
-        .and_then(Value::as_str)
-        .map(normalize_text)
-        .filter(|text| !text.is_empty())
-        .or_else(|| {
-            value
-                .get("text")
-                .and_then(Value::as_str)
-                .map(normalize_text)
-                .filter(|text| !text.is_empty())
-        })
-        .unwrap_or_else(|| "Untitled Cursor session".into());
-    let preview = value
-        .get("latestConversationSummary")
-        .and_then(|summary| summary.get("summary"))
-        .and_then(|summary| summary.get("summary"))
-        .and_then(Value::as_str)
-        .map(normalize_text)
-        .filter(|text| !text.is_empty())
-        .or_else(|| {
-            value
-                .get("text")
-                .and_then(Value::as_str)
-                .map(normalize_text)
-                .filter(|text| !text.is_empty())
-        })
-        .unwrap_or_else(|| "No preview available.".into());
-    let total_tokens = parse_cursor_session_token_total(value).unwrap_or(0);
-    let parsed_cost_usd = value.get("usageData").and_then(parse_usage_data_cost_usd);
-    let cost_usd = parsed_cost_usd.unwrap_or(0.0);
-    let is_priced = parsed_cost_usd.is_some();
-
-    let session = SessionRecord {
-        updated_at,
-        summary: SessionSummary {
-            id: composer_id.to_string(),
-            source_id: SOURCE_ID.into(),
-            title: truncate(&title, 72),
-            preview: truncate(&preview, 180),
-            source: SOURCE_NAME.into(),
-            workspace: workspace.unwrap_or_else(|| "unknown".into()),
-            model: "unknown".into(),
-            started_at: created_at
-                .with_timezone(&Local)
-                .format("%b %-d %H:%M")
-                .to_string(),
-            total_tokens,
-            cost_usd,
-            priced_sessions: if is_priced { 1 } else { 0 },
-            pending_pricing_sessions: if is_priced { 0 } else { 1 },
-            pricing_coverage: if is_priced {
-                PricingCoverage::Actual
-            } else {
-                PricingCoverage::Pending
-            },
-            pricing_state: if is_priced {
-                "actual".into()
-            } else {
-                "pending".into()
-            },
-            calculation_method: if is_priced {
-                CalculationMethod::Native
-            } else {
-                CalculationMethod::Estimated
-            },
-            status: "indexed".into(),
-            parent_session_id: None,
-            session_role: SessionRole::Primary,
-            agent_label: None,
-        },
-    };
-    let usage_event = is_priced.then(|| {
-        build_cursor_pricing_event(
-            composer_id,
-            updated_at,
-            total_tokens,
-            cost_usd,
-            value
-                .get("usageData")
-                .and_then(Value::as_object)
-                .and_then(|usage_data| {
-                    (usage_data.len() == 1)
-                        .then(|| usage_data.keys().next().map(|key| key.to_string()))
-                        .flatten()
-                }),
-        )
-    });
-
-    Some((session, usage_event))
-}
-
-fn parse_usage_data_cost_usd(value: &Value) -> Option<f64> {
-    let usage_data = value.as_object()?;
-    if usage_data.is_empty() {
-        return None;
-    }
-
-    let mut total_cost_in_cents = 0.0;
-    for entry in usage_data.values() {
-        let cost_in_cents = entry.get("costInCents")?.as_f64()?;
-        if !cost_in_cents.is_finite() || cost_in_cents < 0.0 {
-            return None;
-        }
-        total_cost_in_cents += cost_in_cents;
-    }
-
-    Some(total_cost_in_cents / 100.0)
-}
-
-fn parse_cursor_session_token_total(value: &Value) -> Option<u64> {
-    parse_direct_token_total(value)
-        .or_else(|| value.get("usage").and_then(parse_direct_token_total))
-        .or_else(|| value.get("metrics").and_then(parse_direct_token_total))
-        .or_else(|| {
-            let usage_data = value.get("usageData")?.as_object()?;
-            let mut total = 0u64;
-            let mut found_any = false;
-            for entry in usage_data.values() {
-                let entry_total = parse_direct_token_total(entry)?;
-                found_any = true;
-                total = total.saturating_add(entry_total);
-            }
-            found_any.then_some(total)
-        })
-}
-
-fn parse_direct_token_total(value: &Value) -> Option<u64> {
-    ["tokenCount", "totalTokens", "total_tokens"]
-        .iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_u64))
-}
-
-fn build_cursor_pricing_event(
-    session_id: &str,
-    occurred_at: DateTime<Utc>,
-    total_tokens: u64,
-    real_cost_usd: f64,
-    model: Option<String>,
-) -> UsageEvent {
-    UsageEvent {
-        source_id: SOURCE_ID,
-        occurred_at,
-        model: model.unwrap_or_else(|| "unknown".into()),
-        token_breakdown: TokenBreakdown {
-            input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            other_tokens: total_tokens,
-        },
-        total_tokens,
-        calculation_method: CalculationMethod::Native,
-        session_id: session_id.to_string(),
-        explicit_cost_usd: Some(real_cost_usd),
-    }
+    Ok(sessions)
 }
 
 fn composer_workspace_map(workspace_storage: &Path) -> std::collections::HashMap<String, String> {
@@ -440,90 +323,318 @@ fn truncate(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn cursor_status_note() -> &'static str {
+    "Cursor session metadata is indexed locally. Day-level analytics still require native/admin usage ingestion."
+}
+
+fn cursor_total_tokens(value: &Value) -> u64 {
+    value
+        .get("tokenCount")
+        .and_then(|token_count| match token_count {
+            Value::Number(number) => number
+                .as_u64()
+                .or_else(|| number.as_i64().map(|value| value.max(0) as u64)),
+            Value::String(raw) => raw.trim().parse::<u64>().ok(),
+            _ => None,
+        })
+        .filter(|token_count| *token_count > 0)
+        .unwrap_or(0)
+}
+
+fn cursor_cost_usd(value: &Value) -> f64 {
+    let Some(usage_data) = value.get("usageData").and_then(Value::as_object) else {
+        return 0.0;
+    };
+
+    let total_cents: i64 = usage_data
+        .values()
+        .filter_map(|entry| entry.get("costInCents"))
+        .filter_map(cursor_cost_in_cents)
+        .sum();
+
+    (total_cents as f64) / 100.0
+}
+
+fn cursor_pricing_coverage(value: &Value) -> Option<PricingCoverage> {
+    let usage_data = value.get("usageData").and_then(Value::as_object)?;
+    if usage_data.is_empty() {
+        return Some(PricingCoverage::Pending);
+    }
+
+    let priced_entries = usage_data
+        .values()
+        .filter_map(|entry| entry.get("costInCents"))
+        .filter_map(cursor_cost_in_cents)
+        .count();
+
+    Some(match priced_entries {
+        0 => PricingCoverage::Pending,
+        count if count == usage_data.len() => PricingCoverage::Actual,
+        _ => PricingCoverage::Partial,
+    })
+}
+
+fn cursor_model_label(value: &Value) -> String {
+    let Some(usage_data) = value.get("usageData").and_then(Value::as_object) else {
+        return "unknown".into();
+    };
+    if usage_data.is_empty() {
+        return "unknown".into();
+    }
+    if usage_data.len() > 1 {
+        return "mixed".into();
+    }
+
+    let labels = usage_data
+        .keys()
+        .filter_map(|key| normalize_model_label(key))
+        .collect::<Vec<_>>();
+
+    match labels.as_slice() {
+        [] => "unknown".into(),
+        [single] => single.clone(),
+        _ => "mixed".into(),
+    }
+}
+
+fn normalize_model_label(label: &str) -> Option<String> {
+    let normalized = normalize_text(label);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn cursor_cost_in_cents(value: &Value) -> Option<i64> {
+    let cents = match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(raw) => raw.trim().parse::<i64>().ok(),
+        _ => None,
+    }?;
+
+    (cents >= 0).then_some(cents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    #[test]
-    fn parses_cursor_usage_data_into_real_session_cost() {
-        let value = json!({
-            "createdAt": 1_710_000_000_000i64,
-            "lastUpdatedAt": 1_710_000_123_000i64,
-            "name": "Real cost session",
-            "usageData": {
-                "gpt-4.1": { "costInCents": 125 },
-                "claude-3.7": { "costInCents": 75 }
+    use std::env;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct HomeGuard {
+        previous_home: Option<String>,
+    }
+
+    impl HomeGuard {
+        fn set(temp_home: &Path) -> Self {
+            let previous_home = env::var("HOME").ok();
+            env::set_var("HOME", temp_home);
+            Self { previous_home }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(previous_home) = self.previous_home.take() {
+                env::set_var("HOME", previous_home);
+            } else {
+                env::remove_var("HOME");
             }
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        env::temp_dir().join(format!("{prefix}-{stamp}-{}", std::process::id()))
+    }
+
+    fn create_cursor_db(path: &Path, records: &[(&str, &str)]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create sqlite parent");
+        }
+        let connection = Connection::open(path).expect("open sqlite");
+        connection
+            .execute(
+                "create table if not exists cursorDiskKV (key text primary key, value text)",
+                [],
+            )
+            .expect("create cursorDiskKV");
+        for (key, value) in records {
+            connection
+                .execute(
+                    "insert or replace into cursorDiskKV (key, value) values (?1, ?2)",
+                    [key, value],
+                )
+                .expect("insert record");
+        }
+    }
+
+    fn create_workspace_mapping(root: &Path, composer_ids: &[&str], workspace_name: &str) {
+        let workspace_dir = root
+            .join("User")
+            .join("workspaceStorage")
+            .join("workspace-1");
+        fs::create_dir_all(&workspace_dir).expect("create workspace dir");
+
+        let workspace_json = serde_json::json!({
+            "folder": format!("file:///Users/test/{workspace_name}"),
         });
+        fs::write(
+            workspace_dir.join("workspace.json"),
+            serde_json::to_string(&workspace_json).expect("serialize workspace json"),
+        )
+        .expect("write workspace json");
 
-        let (session, usage_event) =
-            parse_cursor_session("composer-1", &value, None).expect("session should parse");
+        let connection =
+            Connection::open(workspace_dir.join("state.vscdb")).expect("open workspace sqlite");
+        connection
+            .execute(
+                "create table if not exists ItemTable (key text primary key, value text)",
+                [],
+            )
+            .expect("create ItemTable");
 
-        assert_eq!(session.summary.cost_usd, 2.0);
-        assert_eq!(session.summary.pricing_coverage, PricingCoverage::Actual);
-        assert_eq!(session.summary.pricing_state, "actual");
-        let usage_event = usage_event.expect("priced session should emit usage event");
-        assert_eq!(usage_event.explicit_cost_usd, Some(2.0));
-        assert_eq!(usage_event.session_id, "composer-1");
+        let all_composers = composer_ids
+            .iter()
+            .map(|composer_id| serde_json::json!({ "composerId": composer_id }))
+            .collect::<Vec<_>>();
+        let composer_value = serde_json::json!({ "allComposers": all_composers });
+        connection
+            .execute(
+                "insert or replace into ItemTable (key, value) values ('composer.composerData', ?1)",
+                [serde_json::to_string(&composer_value).expect("serialize composer value")],
+            )
+            .expect("insert composer data");
     }
 
     #[test]
-    fn cursor_session_stays_pending_when_usage_data_costs_are_invalid() {
-        let malformed = json!({
-            "createdAt": 1_710_000_000_000i64,
-            "lastUpdatedAt": 1_710_000_123_000i64,
-            "usageData": {
-                "gpt-4.1": { "costInCents": 125 },
-                "claude-3.7": { "costInCents": "oops" }
-            }
-        });
-        let missing = json!({
-            "createdAt": 1_710_000_000_000i64,
-            "lastUpdatedAt": 1_710_000_123_000i64,
-            "usageData": {
-                "gpt-4.1": {}
-            }
-        });
+    fn collect_cursor_reports_parsed_session_metadata_and_keeps_ordering() {
+        let temp_home = unique_temp_dir("cursor-home");
+        let _guard = HomeGuard::set(&temp_home);
 
-        let (malformed_session, malformed_event) =
-            parse_cursor_session("composer-1", &malformed, None).expect("session should parse");
-        let (missing_session, missing_event) =
-            parse_cursor_session("composer-2", &missing, None).expect("session should parse");
+        let cursor_root = temp_home
+            .join("Library")
+            .join("Application Support")
+            .join("Cursor");
+        let global_storage = cursor_root.join("User").join("globalStorage");
+        let state_db = global_storage.join("state.vscdb");
+        let backup_db = global_storage.join("state.vscdb.backup");
 
-        assert_eq!(malformed_session.summary.cost_usd, 0.0);
-        assert_eq!(
-            malformed_session.summary.pricing_coverage,
-            PricingCoverage::Pending
+        create_cursor_db(
+            &state_db,
+            &[(
+                "composerData:ignored",
+                "{\"tokenCount\":1,\"usageData\":{\"unused\":{\"costInCents\":1}}}",
+            )],
         );
-        assert_eq!(malformed_session.summary.pricing_state, "pending");
-        assert!(malformed_event.is_none());
 
-        assert_eq!(missing_session.summary.cost_usd, 0.0);
-        assert_eq!(
-            missing_session.summary.pricing_coverage,
-            PricingCoverage::Pending
-        );
-        assert_eq!(missing_session.summary.pricing_state, "pending");
-        assert!(missing_event.is_none());
-    }
-
-    #[test]
-    fn cursor_session_preserves_token_totals_when_token_count_is_present() {
-        let value = json!({
-            "createdAt": 1_710_000_000_000i64,
-            "lastUpdatedAt": 1_710_000_123_000i64,
-            "usageData": {
-                "gpt-4.1": { "costInCents": 240 }
+        let newer = serde_json::json!({
+            "createdAt": 1700000000000i64,
+            "lastUpdatedAt": 1700003600000i64,
+            "name": "  New\nSession  ",
+            "latestConversationSummary": {
+                "summary": {
+                    "summary": "First line\nSecond line"
+                }
             },
-            "tokenCount": 4321
+            "tokenCount": 42,
+            "usageData": {
+                "claude-3.7-sonnet-thinking": {
+                    "costInCents": 8
+                }
+            }
+        });
+        let mixed = serde_json::json!({
+            "createdAt": 1699990000000i64,
+            "lastUpdatedAt": 1699993600000i64,
+            "text": "  fallback text  ",
+            "tokenCount": 0,
+            "usageData": {
+                "gpt-4o": {
+                    "costInCents": 11
+                },
+                "claude-3.5-sonnet": {
+                    "costInCents": 9
+                }
+            }
+        });
+        let unknown = serde_json::json!({
+            "createdAt": 1699980000000i64,
+            "lastUpdatedAt": 1699983600000i64,
+            "usageData": {}
+        });
+        create_cursor_db(
+            &backup_db,
+            &[
+                ("composerData:new", &serde_json::to_string(&newer).unwrap()),
+                ("composerData:mixed", &serde_json::to_string(&mixed).unwrap()),
+                ("composerData:unknown", &serde_json::to_string(&unknown).unwrap()),
+            ],
+        );
+        create_workspace_mapping(&cursor_root, &["new", "mixed"], "workspace-one");
+
+        let report = collect_cursor().expect("collect cursor");
+
+        assert!(report.usage_events.is_empty());
+        assert_eq!(
+            report.status.note,
+            "Cursor session metadata is indexed locally. Day-level analytics still require native/admin usage ingestion."
+        );
+        assert_eq!(report.sessions.len(), 3);
+
+        let first = &report.sessions[0].summary;
+        assert_eq!(first.id, "new");
+        assert_eq!(first.title, "New Session");
+        assert_eq!(first.preview, "First line Second line");
+        assert_eq!(first.workspace, "workspace-one");
+        assert_eq!(first.model, "claude-3.7-sonnet-thinking");
+        assert_eq!(first.total_tokens, 42);
+        assert!((first.cost_usd - 0.08).abs() < f64::EPSILON);
+        assert_eq!(first.calculation_method, CalculationMethod::Derived);
+
+        let second = &report.sessions[1].summary;
+        assert_eq!(second.id, "mixed");
+        assert_eq!(second.model, "mixed");
+        assert_eq!(second.total_tokens, 0);
+        assert!((second.cost_usd - 0.20).abs() < f64::EPSILON);
+        assert_eq!(second.calculation_method, CalculationMethod::Derived);
+
+        let third = &report.sessions[2].summary;
+        assert_eq!(third.id, "unknown");
+        assert_eq!(third.model, "unknown");
+        assert_eq!(third.total_tokens, 0);
+        assert_eq!(third.cost_usd, 0.0);
+        assert_eq!(third.calculation_method, CalculationMethod::Derived);
+    }
+
+    #[test]
+    fn cursor_model_label_treats_multiple_usage_keys_as_mixed() {
+        let value = serde_json::json!({
+            "usageData": {
+                "   ": { "costInCents": 3 },
+                "gpt-4o": { "costInCents": 7 }
+            }
         });
 
-        let (session, usage_event) =
-            parse_cursor_session("composer-1", &value, None).expect("session should parse");
+        assert_eq!(cursor_model_label(&value), "mixed");
+    }
 
-        assert_eq!(session.summary.total_tokens, 4321);
-        let usage_event = usage_event.expect("priced session should emit usage event");
-        assert_eq!(usage_event.total_tokens, 4321);
+    #[test]
+    fn cursor_pricing_coverage_treats_zero_cost_entries_as_priced() {
+        let value = serde_json::json!({
+            "usageData": {
+                "gpt-4o": { "costInCents": 0 },
+                "claude-3.7-sonnet-thinking": { "costInCents": 7 }
+            }
+        });
+
+        assert!((cursor_cost_usd(&value) - 0.07).abs() < f64::EPSILON);
+        assert_eq!(
+            cursor_pricing_coverage(&value),
+            Some(PricingCoverage::Actual)
+        );
     }
 }

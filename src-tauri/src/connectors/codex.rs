@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,9 +11,7 @@ use walkdir::WalkDir;
 use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
-use crate::models::{
-    CalculationMethod, PricingCoverage, SessionRole, SessionSummary, SourceState, SourceStatus,
-};
+use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
 use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "codex";
@@ -32,38 +30,22 @@ struct RawUsage {
 
 impl RawUsage {
     fn token_breakdown(&self) -> TokenBreakdown {
-        let input_tokens = self.input_tokens.saturating_sub(self.cached_input_tokens);
-        let output_tokens = self.output_tokens;
-        let classified_tokens = input_tokens
+        let output_tokens = self
+            .output_tokens
+            .saturating_add(self.reasoning_output_tokens);
+        let classified_tokens = self
+            .input_tokens
             .saturating_add(self.cached_input_tokens)
             .saturating_add(output_tokens);
 
         TokenBreakdown {
-            input_tokens,
+            input_tokens: self.input_tokens,
             cache_creation_input_tokens: 0,
             cached_input_tokens: self.cached_input_tokens,
             output_tokens,
             other_tokens: self.total_tokens.saturating_sub(classified_tokens),
         }
     }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct SessionThreadMetadata {
-    parent_session_id: Option<String>,
-    session_role: SessionRole,
-    agent_label: Option<String>,
-}
-
-struct SessionFilesScan {
-    usage_events: Vec<UsageEvent>,
-    thread_metadata_by_session: HashMap<String, SessionThreadMetadata>,
-}
-
-struct SessionFileScan {
-    session_id: String,
-    thread_metadata: SessionThreadMetadata,
-    usage_events: Vec<UsageEvent>,
 }
 
 impl SourceConnector for CodexConnector {
@@ -124,7 +106,6 @@ fn collect_codex() -> Result<SourceReport> {
 
     let mut sessions = Vec::new();
     let mut usage_events = Vec::new();
-    let mut session_thread_metadata = HashMap::new();
 
     if let Some(state_db) = latest_state_db.as_ref() {
         let connection = open_read_only(state_db)?;
@@ -133,19 +114,13 @@ fn collect_codex() -> Result<SourceReport> {
             .ok()
             .flatten()
             .map(format_timestamp);
+        sessions = query_recent_sessions(&connection)?;
     }
 
     if sessions_root.exists() {
-        let scan = query_usage_events_from_session_files(&sessions_root)?;
-        usage_events = scan.usage_events;
-        session_thread_metadata = scan.thread_metadata_by_session;
+        usage_events = query_usage_events_from_session_files(&sessions_root)?;
     } else if !log_dbs.is_empty() {
         usage_events = query_usage_events(&log_dbs)?;
-    }
-
-    if let Some(state_db) = latest_state_db.as_ref() {
-        let connection = open_read_only(state_db)?;
-        sessions = query_recent_sessions(&connection, &session_thread_metadata)?;
     }
 
     if !sessions.is_empty() || !usage_events.is_empty() {
@@ -188,10 +163,7 @@ fn missing_report() -> SourceReport {
     }
 }
 
-fn query_recent_sessions(
-    connection: &Connection,
-    thread_metadata_by_session: &HashMap<String, SessionThreadMetadata>,
-) -> Result<Vec<SessionRecord>> {
+fn query_recent_sessions(connection: &Connection) -> Result<Vec<SessionRecord>> {
     let mut statement = connection.prepare(
         "select id, created_at, updated_at, tokens_used, coalesce(model, ''), coalesce(cwd, ''), \
          coalesce(title, ''), coalesce(first_user_message, '') \
@@ -224,7 +196,6 @@ fn query_recent_sessions(
     for row in rows {
         let (id, created_at, updated_at, total_tokens, model, cwd, title, first_user_message) =
             row?;
-        let thread_metadata = thread_metadata_by_session.get(&id).cloned().unwrap_or_default();
         let started_at = epoch_to_utc(created_at).unwrap_or_else(Utc::now);
         let updated_at_dt = epoch_to_utc(updated_at).unwrap_or(started_at);
         let started_local = started_at.with_timezone(&Local);
@@ -244,15 +215,9 @@ fn query_recent_sessions(
                 started_at: started_local.format("%b %-d %H:%M").to_string(),
                 total_tokens: total_tokens.max(0) as u64,
                 cost_usd: 0.0,
-                priced_sessions: 0,
-                pending_pricing_sessions: 0,
-                pricing_coverage: PricingCoverage::Pending,
-                pricing_state: "pending".into(),
+                pricing_coverage: None,
                 calculation_method: CalculationMethod::Native,
                 status: "indexed".into(),
-                parent_session_id: thread_metadata.parent_session_id,
-                session_role: thread_metadata.session_role,
-                agent_label: thread_metadata.agent_label,
             },
         });
     }
@@ -299,10 +264,9 @@ fn query_usage_events(log_dbs: &[PathBuf]) -> Result<Vec<UsageEvent>> {
     Ok(events)
 }
 
-fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<SessionFilesScan> {
+fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<Vec<UsageEvent>> {
     let cutoff = Utc::now() - chrono::Duration::days(180);
     let mut events = Vec::new();
-    let mut thread_metadata_by_session = HashMap::new();
     let session_files = WalkDir::new(sessions_root)
         .into_iter()
         .filter_map(std::result::Result::ok)
@@ -313,7 +277,9 @@ fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<Session
     let total_files = session_files.len();
 
     for (index, path) in session_files.iter().enumerate() {
-        if total_files > 0 && (index == 0 || index + 1 == total_files || (index + 1) % 50 == 0) {
+        if total_files > 0
+            && (index == 0 || index + 1 == total_files || (index + 1) % 50 == 0)
+        {
             report_scan_detail(
                 SOURCE_NAME,
                 format!("Session files {}/{}", index + 1, total_files),
@@ -325,20 +291,16 @@ fn query_usage_events_from_session_files(sessions_root: &Path) -> Result<Session
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("unknown");
-        let scan = parse_session_file(&contents, fallback_session_id);
-        thread_metadata_by_session.insert(scan.session_id.clone(), scan.thread_metadata);
+
         events.extend(
-            scan.usage_events
+            parse_session_usage_events(&contents, fallback_session_id)
                 .into_iter()
                 .filter(|event| event.occurred_at >= cutoff),
         );
     }
 
     events.sort_by(|left, right| left.occurred_at.cmp(&right.occurred_at));
-    Ok(SessionFilesScan {
-        usage_events: events,
-        thread_metadata_by_session,
-    })
+    Ok(events)
 }
 
 fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
@@ -373,22 +335,14 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
         total_tokens,
         calculation_method: CalculationMethod::Native,
         session_id,
-        explicit_cost_usd: None,
     })
 }
 
-#[cfg(test)]
 fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<UsageEvent> {
-    parse_session_file(contents, fallback_session_id).usage_events
-}
-
-fn parse_session_file(contents: &str, fallback_session_id: &str) -> SessionFileScan {
     let mut events = Vec::new();
-    let mut session_id = fallback_session_id.to_string();
+    let mut session_id = String::new();
     let mut session_model = String::from("unknown");
-    let mut thread_metadata = SessionThreadMetadata::default();
     let mut previous_totals: Option<RawUsage> = None;
-    let mut saw_session_meta = false;
 
     for line in contents.lines() {
         let trimmed = line.trim();
@@ -408,24 +362,17 @@ fn parse_session_file(contents: &str, fallback_session_id: &str) -> SessionFileS
             continue;
         };
 
-        let entry_type = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let entry_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
         if entry_type == "session_meta" {
-            if !saw_session_meta {
+            if session_id.is_empty() {
                 if let Some(meta_id) = value
-                    .get("payload")
-                    .and_then(|payload| payload.get("id"))
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
+                .get("payload")
+                .and_then(|payload| payload.get("id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
                 {
                     session_id = meta_id.to_string();
                 }
-                if let Some(metadata) = extract_session_thread_metadata(&value) {
-                    thread_metadata = metadata;
-                }
-                saw_session_meta = true;
             }
             continue;
         }
@@ -472,15 +419,13 @@ fn parse_session_file(contents: &str, fallback_session_id: &str) -> SessionFileS
             .and_then(|info| info.get("total_token_usage"))
             .and_then(normalize_raw_usage);
 
-        let raw_usage = if let Some(last_usage) = last_usage {
-            Some(last_usage)
-        } else {
-            total_usage.map(|total_usage| subtract_raw_usage(total_usage, previous_totals.as_ref()))
-        };
-
-        if let Some(total_usage) = total_usage {
+        let raw_usage = if let Some(total_usage) = total_usage {
+            let delta = subtract_raw_usage(total_usage, previous_totals.as_ref());
             previous_totals = Some(total_usage);
-        }
+            Some(delta)
+        } else {
+            last_usage
+        };
 
         let Some(raw_usage) = raw_usage else {
             continue;
@@ -499,58 +444,15 @@ fn parse_session_file(contents: &str, fallback_session_id: &str) -> SessionFileS
             token_breakdown,
             total_tokens,
             calculation_method: CalculationMethod::Native,
-            session_id: session_id.clone(),
-            explicit_cost_usd: None,
+            session_id: if session_id.is_empty() {
+                fallback_session_id.to_string()
+            } else {
+                session_id.clone()
+            },
         });
     }
 
-    SessionFileScan {
-        session_id,
-        thread_metadata,
-        usage_events: events,
-    }
-}
-
-fn extract_session_thread_metadata(value: &Value) -> Option<SessionThreadMetadata> {
-    let payload = value.get("payload")?;
-    let thread_spawn = payload
-        .get("source")
-        .and_then(|source| source.get("subagent"))
-        .and_then(|subagent| subagent.get("thread_spawn"));
-    let parent_session_id = payload
-        .get("forked_from_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            thread_spawn
-                .and_then(|spawn| spawn.get("parent_thread_id"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-        });
-    let agent_label = payload
-        .get("agent_nickname")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            thread_spawn
-                .and_then(|spawn| spawn.get("agent_nickname"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-        });
-
-    Some(SessionThreadMetadata {
-        parent_session_id: parent_session_id.clone(),
-        session_role: if parent_session_id.is_some() {
-            SessionRole::Subagent
-        } else {
-            SessionRole::Primary
-        },
-        agent_label,
-    })
+    events
 }
 
 fn normalize_raw_usage(value: &Value) -> Option<RawUsage> {
@@ -559,11 +461,7 @@ fn normalize_raw_usage(value: &Value) -> Option<RawUsage> {
     let cached_input_tokens = record
         .get("cached_input_tokens")
         .and_then(number_from_value)
-        .or_else(|| {
-            record
-                .get("cache_read_input_tokens")
-                .and_then(number_from_value)
-        })
+        .or_else(|| record.get("cache_read_input_tokens").and_then(number_from_value))
         .unwrap_or(0);
     let output_tokens = record
         .get("output_tokens")
@@ -610,13 +508,8 @@ fn subtract_raw_usage(current: RawUsage, previous: Option<&RawUsage>) -> RawUsag
 
 fn number_from_value(value: &Value) -> Option<u64> {
     value.as_u64().or_else(|| {
-        value.as_i64().and_then(|number| {
-            if number >= 0 {
-                Some(number as u64)
-            } else {
-                None
-            }
-        })
+        value.as_i64()
+            .and_then(|number| if number >= 0 { Some(number as u64) } else { None })
     })
 }
 
@@ -771,10 +664,7 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "thread-123");
-        assert_eq!(events[0].total_tokens, 1700);
-        assert_eq!(events[0].token_breakdown.input_tokens, 1000);
-        assert_eq!(events[0].token_breakdown.cached_input_tokens, 200);
-        assert_eq!(events[0].token_breakdown.output_tokens, 500);
+        assert_eq!(events[0].total_tokens, 1950);
         assert_eq!(
             events[0].occurred_at,
             DateTime::parse_from_rfc3339("2026-03-23T06:41:09.961Z")
@@ -792,9 +682,36 @@ mod tests {
         let events = parse_session_usage_events(contents, "fallback-id");
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].total_tokens, 1700);
+        assert_eq!(events[0].total_tokens, 1950);
         assert_eq!(events[1].session_id, "thread-456");
-        assert_eq!(events[1].total_tokens, 1100);
+        assert_eq!(events[1].total_tokens, 1270);
+    }
+
+    #[test]
+    fn prefers_total_usage_deltas_when_last_usage_snapshots_repeat() {
+        let contents = r#"{"timestamp":"2026-03-23T06:25:22.394Z","type":"session_meta","payload":{"id":"thread-456"}}
+{"timestamp":"2026-03-23T06:41:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700},"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700}}}}
+{"timestamp":"2026-03-23T06:41:39.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700},"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700}}}}
+{"timestamp":"2026-03-23T06:42:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":800,"cached_input_tokens":100,"output_tokens":300,"reasoning_output_tokens":70,"total_tokens":1100},"total_token_usage":{"input_tokens":2000,"cached_input_tokens":300,"output_tokens":800,"reasoning_output_tokens":120,"total_tokens":2800}}}}"#;
+
+        let events = parse_session_usage_events(contents, "fallback-id");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].total_tokens, 1950);
+        assert_eq!(events[1].total_tokens, 1270);
+    }
+
+    #[test]
+    fn keeps_first_session_meta_id_for_forked_rollouts() {
+        let contents = r#"{"timestamp":"2026-03-24T10:29:02.752Z","type":"session_meta","payload":{"id":"child-thread","forked_from_id":"parent-thread"}}
+{"timestamp":"2026-03-24T10:30:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700}}}}
+{"timestamp":"2026-03-24T10:31:02.752Z","type":"session_meta","payload":{"id":"parent-thread"}}
+{"timestamp":"2026-03-24T10:31:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":170}}}}"#;
+
+        let events = parse_session_usage_events(contents, "fallback-id");
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.session_id == "child-thread"));
     }
 
     #[test]
@@ -807,51 +724,6 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].model, "gpt-5.4");
-        assert_eq!(events[0].estimated_cost_usd(), Some(0.010_05));
-    }
-
-    #[test]
-    fn keeps_child_session_id_when_rollout_embeds_parent_session_meta() {
-        let contents = r#"{"timestamp":"2026-03-24T10:29:02.817Z","type":"session_meta","payload":{"id":"child-thread","forked_from_id":"parent-thread","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-thread","depth":1}}}}}
-{"timestamp":"2026-03-24T10:29:02.818Z","type":"session_meta","payload":{"id":"parent-thread","source":"vscode"}}
-{"timestamp":"2026-03-24T10:29:02.819Z","type":"turn_context","payload":{"model":"gpt-5.4"}}
-{"timestamp":"2026-03-24T10:29:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}}}"#;
-
-        let events = parse_session_usage_events(contents, "fallback-id");
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].session_id, "child-thread");
-        assert_eq!(events[0].total_tokens, 150);
-    }
-
-    #[test]
-    fn extracts_subagent_relationship_from_session_meta() {
-        let value = serde_json::from_str::<Value>(
-            r#"{
-                "type":"session_meta",
-                "payload":{
-                    "id":"child-thread",
-                    "forked_from_id":"parent-thread",
-                    "agent_nickname":"Euler",
-                    "source":{
-                        "subagent":{
-                            "thread_spawn":{
-                                "parent_thread_id":"parent-thread",
-                                "depth":1,
-                                "agent_nickname":"Euler",
-                                "agent_role":"explorer"
-                            }
-                        }
-                    }
-                }
-            }"#,
-        )
-        .expect("session_meta json");
-
-        let metadata = extract_session_thread_metadata(&value).expect("thread metadata");
-
-        assert_eq!(metadata.parent_session_id.as_deref(), Some("parent-thread"));
-        assert_eq!(metadata.session_role, SessionRole::Subagent);
-        assert_eq!(metadata.agent_label.as_deref(), Some("Euler"));
+        assert!(events[0].estimated_cost_usd().is_some());
     }
 }

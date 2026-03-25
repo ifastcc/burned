@@ -13,9 +13,7 @@ use walkdir::WalkDir;
 use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
-use crate::models::{
-    CalculationMethod, PricingCoverage, SessionRole, SessionSummary, SourceState, SourceStatus,
-};
+use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
 use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "claude_code";
@@ -80,7 +78,9 @@ fn collect_claude() -> Result<SourceReport> {
     let parse_target_total = parse_targets.len();
     for (index, path) in parse_targets.into_iter().enumerate() {
         if parse_target_total > 0
-            && (index == 0 || index + 1 == parse_target_total || (index + 1) % 25 == 0)
+            && (index == 0
+                || index + 1 == parse_target_total
+                || (index + 1) % 25 == 0)
         {
             report_scan_detail(
                 SOURCE_NAME,
@@ -306,7 +306,6 @@ fn parse_session_file(path: &Path) -> Result<ParsedSessionFile> {
                     total_tokens,
                     calculation_method: CalculationMethod::Native,
                     session_id: session_id.clone(),
-                    explicit_cost_usd: None,
                 });
                 accumulator.total_tokens += total_tokens;
             }
@@ -352,15 +351,9 @@ fn to_session_record(session: SessionAccumulator) -> Option<SessionRecord> {
                 .to_string(),
             total_tokens: session.total_tokens,
             cost_usd: 0.0,
-            priced_sessions: 0,
-            pending_pricing_sessions: 0,
-            pricing_coverage: PricingCoverage::Pending,
-            pricing_state: "pending".into(),
+            pricing_coverage: None,
             calculation_method: CalculationMethod::Native,
             status: "indexed".into(),
-            parent_session_id: None,
-            session_role: SessionRole::Primary,
-            agent_label: None,
         },
     })
 }

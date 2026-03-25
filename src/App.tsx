@@ -1,24 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 import { createEmptyDashboardSnapshot } from "./data/empty-dashboard";
-import { toLocalIsoDate } from "./date-utils.mjs";
-import { appCopy } from "./app-copy.mjs";
-import {
-  buildSessionThreadGroups,
-  shouldShowSourceLabel,
-  sortSessionThreadGroups,
-} from "./session-threads.mjs";
+import { resolveSelectedDateAfterRefresh, toIsoDateInTimeZone } from "./date-utils.mjs";
+import { showcaseCopy } from "./showcase-copy.mjs";
 import type {
-  BillingState,
   DailyUsagePoint,
   DashboardSnapshot,
-  PeriodicBreakdownRow,
-  PricingCoverage,
   SessionSummary,
   SourceDetailSnapshot,
   SourceStatus,
   SourceUsage,
-  UsageWindowSummary,
 } from "./data/schema";
 import {
   calculationLabel,
@@ -33,12 +24,6 @@ import {
 import "./styles.css";
 
 type AppRoute = { kind: "home" } | { kind: "source"; sourceId: string };
-type SessionThreadGroup = {
-  id: string;
-  session: SessionSummary;
-  children: SessionSummary[];
-  displaySession: SessionSummary;
-};
 
 function formatUsd(value: number, locale: Locale) {
   return new Intl.NumberFormat(locale === "zh-CN" ? "en-US" : "en-US", {
@@ -47,110 +32,6 @@ function formatUsd(value: number, locale: Locale) {
     minimumFractionDigits: value >= 1 ? 2 : 3,
     maximumFractionDigits: value >= 1 ? 2 : 3,
   }).format(value);
-}
-
-function pricingCoverageLabel(locale: Locale, coverage: PricingCoverage) {
-  if (locale === "zh-CN") {
-    switch (coverage) {
-      case "actual":
-        return "已计价";
-      case "partial":
-        return "部分计价";
-      default:
-        return "待补价";
-    }
-  }
-
-  switch (coverage) {
-    case "actual":
-      return "Actual";
-    case "partial":
-      return "Partial";
-    default:
-      return "Pending";
-  }
-}
-
-function billingStateLabel(locale: Locale, state: BillingState["state"]) {
-  if (locale === "zh-CN") {
-    switch (state) {
-      case "ready":
-        return "可用";
-      case "partial":
-        return "部分可用";
-      default:
-        return "不可用";
-    }
-  }
-
-  switch (state) {
-    case "ready":
-      return "Ready";
-    case "partial":
-      return "Partial";
-    default:
-      return "Unavailable";
-  }
-}
-
-function formatCoverageCost(
-  costUsd: number,
-  coverage: PricingCoverage,
-  locale: Locale,
-  estimatedCost: (cost: string) => string,
-  pricingPending: string,
-) {
-  if (costUsd <= 0) {
-    return pricingPending;
-  }
-
-  const formatted = formatUsd(costUsd, locale);
-  return coverage === "actual" ? formatted : estimatedCost(formatted);
-}
-
-function formatSignedTokenDelta(value: number, locale: Locale) {
-  const abs = Math.abs(value);
-  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
-  return `${sign}${formatCompactNumber(abs, locale, 1)}`;
-}
-
-function formatShare(value: number, locale: Locale) {
-  return new Intl.NumberFormat(locale === "zh-CN" ? "zh-CN" : "en-US", {
-    style: "percent",
-    maximumFractionDigits: 0,
-  }).format(value);
-}
-
-function formatPeriodDate(date: string, locale: Locale) {
-  return new Date(`${date}T12:00:00`).toLocaleDateString(
-    locale === "zh-CN" ? "zh-CN" : "en-US",
-    {
-      month: "short",
-      day: "numeric",
-    },
-  );
-}
-
-function formatBillingUsage(billingState: BillingState, locale: Locale, fallback: string) {
-  const formatValue = (value: number | null) =>
-    value == null ? null : formatFriendlyNumber(value, locale, 1);
-  const current = formatValue(billingState.current);
-  const limit = formatValue(billingState.limit);
-  const unit = billingState.unit ? ` ${billingState.unit}` : "";
-
-  if (current && limit) {
-    return `${current} / ${limit}${unit}`;
-  }
-
-  if (current) {
-    return `${current}${unit}`;
-  }
-
-  if (limit) {
-    return `${limit}${unit}`;
-  }
-
-  return fallback;
 }
 
 function readRoute(pathname: string): AppRoute {
@@ -184,13 +65,22 @@ declare global {
   }
 }
 
+function getResolvedTimeZone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
 async function getDashboardSnapshot() {
+  const timeZone = getResolvedTimeZone();
+
   if (window.__TAURI_INTERNALS__) {
-    return invoke<DashboardSnapshot>("get_dashboard_snapshot");
+    return invoke<DashboardSnapshot>("get_dashboard_snapshot", { timeZone });
   }
 
   const response = await fetch("/api/snapshot", {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "X-Burned-Time-Zone": timeZone,
+    },
   });
   if (!response.ok) {
     throw new Error(`Snapshot request failed with ${response.status}`);
@@ -200,12 +90,17 @@ async function getDashboardSnapshot() {
 }
 
 function getSourceSnapshot(sourceId: string) {
+  const timeZone = getResolvedTimeZone();
+
   if (window.__TAURI_INTERNALS__) {
-    return invoke<SourceDetailSnapshot>("get_source_snapshot", { sourceId });
+    return invoke<SourceDetailSnapshot>("get_source_snapshot", { sourceId, timeZone });
   }
 
   return fetch(`/api/sources/${encodeURIComponent(sourceId)}`, {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "X-Burned-Time-Zone": timeZone,
+    },
   }).then(async (response) => {
     if (!response.ok) {
       throw new Error(`Source snapshot request failed with ${response.status}`);
@@ -266,6 +161,27 @@ function formatTokenFigure(tokens: number, locale: Locale) {
   return formatFriendlyNumber(tokens, locale, 1);
 }
 
+function useRetainedDateSelection(data: DailyUsagePoint[]) {
+  const latestDay = data[data.length - 1];
+  const [selectedDate, setSelectedDate] = useState(latestDay.date);
+  const previousLatestDateRef = useRef(latestDay.date);
+
+  useEffect(() => {
+    const availableDates = data.map((day) => day.date);
+    setSelectedDate((current) =>
+      resolveSelectedDateAfterRefresh({
+        currentDate: current,
+        previousLatestDate: previousLatestDateRef.current,
+        nextLatestDate: latestDay.date,
+        availableDates,
+      }),
+    );
+    previousLatestDateRef.current = latestDay.date;
+  }, [data, latestDay.date]);
+
+  return { latestDay, selectedDate, setSelectedDate };
+}
+
 function TrendInspector({
   day,
   locale,
@@ -290,15 +206,45 @@ function TrendInspector({
         {!hasUsage
           ? "—"
           : hasCost
-            ? formatCoverageCost(
-                day.totalCostUsd,
-                day.pricingCoverage,
-                locale,
-                estimatedCost,
-                pricingPending,
-              )
+            ? estimatedCost(formatUsd(day.totalCostUsd, locale))
             : pricingPending}
       </span>
+    </div>
+  );
+}
+
+function WeeklyDayFocus({
+  day,
+  locale,
+  estimatedCost,
+  pricingPending,
+}: {
+  day: DailyUsagePoint;
+  locale: Locale;
+  estimatedCost: (cost: string) => string;
+  pricingPending: string;
+}) {
+  const hasUsage = day.totalTokens > 0;
+  const hasCost = day.totalCostUsd > 0;
+
+  return (
+    <div className="weekly-focus">
+      <strong className="weekly-focus-value">
+        {hasUsage ? formatTokenFigure(day.totalTokens, locale) : "—"}
+      </strong>
+      <div className="weekly-focus-meta">
+        <span className="weekly-focus-date">{formatDayStamp(day.date, locale)}</span>
+        {hasUsage && (
+          <>
+            <span className="weekly-focus-sep" aria-hidden="true">
+              ·
+            </span>
+            <span className={`weekly-focus-cost${hasCost ? "" : " pending"}`}>
+              {hasCost ? estimatedCost(formatUsd(day.totalCostUsd, locale)) : pricingPending}
+            </span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -422,7 +368,7 @@ function FlameChart({
   onSelectDate: (date: string) => void;
 }) {
   const maxTokens = Math.max(...data.map((d) => d.totalTokens), 1);
-  const todayStr = toLocalIsoDate();
+  const todayStr = toIsoDateInTimeZone(new Date(), getResolvedTimeZone());
   const loc = locale === "zh-CN" ? "zh-CN" : "en-US";
 
   return (
@@ -475,6 +421,7 @@ function WeeklyBurnCard({
   data,
   locale,
   label,
+  title,
   totalLabel,
   avgDayLabel,
   estimatedCost,
@@ -483,6 +430,7 @@ function WeeklyBurnCard({
   data: DailyUsagePoint[];
   locale: Locale;
   label: string;
+  title: string;
   totalLabel: string;
   avgDayLabel: string;
   estimatedCost: (cost: string) => string;
@@ -494,25 +442,18 @@ function WeeklyBurnCard({
 
   const total7 = data.reduce((sum, day) => sum + day.totalTokens, 0);
   const avg7 = data.length === 0 ? 0 : Math.round(total7 / data.length);
-  const peakDay = pickPeakDay(data);
-  const [selectedDate, setSelectedDate] = useState(peakDay.date);
+  const { selectedDate, setSelectedDate } = useRetainedDateSelection(data);
 
-  useEffect(() => {
-    setSelectedDate((current) =>
-      data.some((day) => day.date === current) ? current : peakDay.date,
-    );
-  }, [data, peakDay.date]);
-
-  const activeDay = data.find((day) => day.date === selectedDate) ?? peakDay;
+  const activeDay = data.find((day) => day.date === selectedDate) ?? data[data.length - 1];
 
   return (
     <section className="trend-section weekly-trend-section">
       <article className="weekly-burn-card">
         <div className="weekly-burn-head">
-          <div className="trend-copy">
+          <div className="trend-copy weekly-trend-copy">
             <p className="trend-kicker">{label}</p>
-            <h2 className="trend-title">{formatDayStamp(activeDay.date, locale)}</h2>
-            <TrendInspector
+            <h2 className="trend-title">{title}</h2>
+            <WeeklyDayFocus
               day={activeDay}
               locale={locale}
               estimatedCost={estimatedCost}
@@ -587,20 +528,13 @@ function MonthlyTrendCard({
       : Math.round(week.reduce((sum, day) => sum + day.totalTokens, 0) / week.length);
   const delta = avg30 > 0 ? (avg7 - avg30) / avg30 : null;
   const peakDay = pickPeakDay(data);
-  const latestDay = data[data.length - 1];
-  const [selectedDate, setSelectedDate] = useState(latestDay.date);
-
-  useEffect(() => {
-    setSelectedDate((current) =>
-      data.some((day) => day.date === current) ? current : latestDay.date,
-    );
-  }, [data, latestDay.date]);
+  const { selectedDate, setSelectedDate } = useRetainedDateSelection(data);
 
   const headline =
     delta != null && Math.abs(delta) >= 0.005
       ? monthDeltaText(formatSignedPercent(delta, locale))
       : monthFlatText;
-  const activeDay = data.find((day) => day.date === selectedDate) ?? latestDay;
+  const activeDay = data.find((day) => day.date === selectedDate) ?? data[data.length - 1];
 
   return (
     <section className="trend-section monthly-trend-section">
@@ -715,22 +649,14 @@ function SourceList({
 function ConnectorGrid({
   statuses,
   locale,
-  onOpenSource,
 }: {
   statuses: SourceStatus[];
   locale: Locale;
-  onOpenSource: (sourceId: string) => void;
 }) {
   return (
     <div className="conn-grid">
       {statuses.map((st) => (
-        <button
-          key={st.id}
-          type="button"
-          className="conn-card"
-          onClick={() => onOpenSource(st.id)}
-          aria-label={`${st.name} ${sourceStateLabel(locale, st.state)}`}
-        >
+        <div key={st.id} className="conn-card">
           <span className={`conn-dot ${st.state}`} />
           <div className="conn-info">
             <span className="conn-name">{st.name}</span>
@@ -741,7 +667,7 @@ function ConnectorGrid({
           {st.sessionCount != null && (
             <span className="conn-meta">{st.sessionCount} sess</span>
           )}
-        </button>
+        </div>
       ))}
     </div>
   );
@@ -752,406 +678,34 @@ function SessionFeed({
   locale,
   estimatedCost,
   pricingPending,
-  subagentsLabel,
-  hideSubagents,
-  subagentTag,
-  sort = "recent",
-  sourceScoped = false,
   limit = 6,
 }: {
   sessions: SessionSummary[];
   locale: Locale;
   estimatedCost: (cost: string) => string;
   pricingPending: string;
-  subagentsLabel: (count: number) => string;
-  hideSubagents: string;
-  subagentTag: (label?: string | null) => string;
-  sort?: "recent" | "tokens" | "cost";
-  sourceScoped?: boolean;
   limit?: number;
 }) {
-  const [expandedThreads, setExpandedThreads] = useState<Record<string, boolean>>({});
-
-  useEffect(() => {
-    setExpandedThreads({});
-  }, [sessions, limit]);
-
-  const groupedSessions: SessionThreadGroup[] = sortSessionThreadGroups(
-    buildSessionThreadGroups(sessions) as SessionThreadGroup[],
-    sort,
-  ).slice(0, limit);
-
   return (
     <div className="sess-feed">
-      {groupedSessions.map((group) => {
-        const isExpanded = expandedThreads[group.id] ?? false;
-        return (
-          <SessionCard
-            key={`${group.session.sourceId}:${group.id}`}
-            session={group.displaySession}
-            childSessions={group.children}
-            locale={locale}
-            estimatedCost={estimatedCost}
-            pricingPending={pricingPending}
-            subagentsLabel={subagentsLabel}
-            hideSubagents={hideSubagents}
-            subagentTag={subagentTag}
-            showSourceLabel={shouldShowSourceLabel({ nested: false, sourceScoped })}
-            isExpanded={isExpanded}
-            onToggleChildren={
-              group.children.length > 0
-                ? () =>
-                    setExpandedThreads((current) => ({
-                      ...current,
-                      [group.id]: !current[group.id],
-                    }))
-                : undefined
-            }
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function SessionCard({
-  session,
-  childSessions,
-  locale,
-  estimatedCost,
-  pricingPending,
-  subagentsLabel,
-  hideSubagents,
-  subagentTag,
-  showSourceLabel = true,
-  isExpanded = false,
-  onToggleChildren,
-  nested = false,
-}: {
-  session: SessionSummary;
-  childSessions?: SessionSummary[];
-  locale: Locale;
-  estimatedCost: (cost: string) => string;
-  pricingPending: string;
-  subagentsLabel: (count: number) => string;
-  hideSubagents: string;
-  subagentTag: (label?: string | null) => string;
-  showSourceLabel?: boolean;
-  isExpanded?: boolean;
-  onToggleChildren?: (() => void) | undefined;
-  nested?: boolean;
-}) {
-  const children = childSessions ?? [];
-  const isSubagent = session.sessionRole === "subagent";
-  const displayTitle =
-    nested && isSubagent ? subagentTag(session.agentLabel) : session.title || "Untitled";
-
-  return (
-    <div className={`sess-item${nested ? " nested" : ""}`}>
-      <div className="sess-top">
-        <span className="sess-title">{displayTitle}</span>
-        <div className="sess-side">
-          {children.length > 0 && onToggleChildren ? (
-            <button
-              type="button"
-              className="sess-thread-toggle"
-              onClick={onToggleChildren}
-              aria-expanded={isExpanded}
-            >
-              {isExpanded ? hideSubagents : subagentsLabel(children.length)}
-            </button>
-          ) : null}
-          {showSourceLabel ? <span className="sess-source">{session.source}</span> : null}
-        </div>
-      </div>
-      <div className="sess-meta">
-        <span>{session.model}</span>
-        <span>{formatCompactNumber(session.totalTokens, locale, 1)} tokens</span>
-        <span className={`sess-cost${session.costUsd > 0 ? "" : " pending"}`}>
-          {session.costUsd > 0
-            ? formatCoverageCost(
-                session.costUsd,
-                session.pricingCoverage,
-                locale,
-                estimatedCost,
-                pricingPending,
-              )
-            : pricingPending}
-        </span>
-      </div>
-      {isSubagent && !nested ? (
-        <p className="sess-thread-note">{subagentTag(session.agentLabel)}</p>
-      ) : null}
-      {isExpanded && children.length > 0 ? (
-        <div className="sess-children">
-          {children.map((child) => (
-            <SessionCard
-              key={`${child.sourceId}:${child.id}`}
-              session={child}
-              locale={locale}
-              estimatedCost={estimatedCost}
-              pricingPending={pricingPending}
-              subagentsLabel={subagentsLabel}
-              hideSubagents={hideSubagents}
-              subagentTag={subagentTag}
-              showSourceLabel={false}
-              nested
-            />
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function BillingSummaryCard({
-  billingState,
-  locale,
-  sc,
-  pricingPending,
-}: {
-  billingState: BillingState;
-  locale: Locale;
-  sc: typeof appCopy["en-US"];
-  pricingPending: string;
-}) {
-  const updatedAt =
-    formatLocalizedDateTime(billingState.updatedAt ?? undefined, locale) ?? billingState.updatedAt;
-  const usageLabel =
-    billingState.kind === "quota"
-      ? locale === "zh-CN"
-        ? "周期配额"
-        : "Periodic quota"
-      : locale === "zh-CN"
-        ? "Credits"
-        : "Credits";
-
-  return (
-    <article className="source-summary-card billing-summary-card">
-      <div className="source-summary-top">
-        <span className="source-summary-window">{sc.billingTitle}</span>
-        <span className={`coverage-pill ${billingState.state}`}>
-          {billingStateLabel(locale, billingState.state)}
-        </span>
-      </div>
-      <strong className="source-summary-value">
-        {formatBillingUsage(billingState, locale, pricingPending)}
-      </strong>
-      <p className="source-summary-cost">{billingState.note ?? usageLabel}</p>
-      <div className="source-summary-meta">
-        <span>
-          {sc.billingUsage} {usageLabel}
-        </span>
-        <span>
-          {updatedAt ? `${sc.billingUpdated} ${updatedAt}` : billingStateLabel(locale, billingState.state)}
-        </span>
-      </div>
-    </article>
-  );
-}
-
-function SourceSummaryCards({
-  snapshot,
-  locale,
-  sc,
-  estimatedCost,
-  pricingPending,
-}: {
-  snapshot: SourceDetailSnapshot;
-  locale: Locale;
-  sc: typeof appCopy["en-US"];
-  estimatedCost: (cost: string) => string;
-  pricingPending: string;
-}) {
-  const cards: Array<{
-    id: string;
-    label: string;
-    summary: UsageWindowSummary;
-  }> = [
-    {
-      id: "today",
-      label: locale === "zh-CN" ? "今天" : "Today",
-      summary: snapshot.todaySummary,
-    },
-    {
-      id: "7d",
-      label: "7D",
-      summary: snapshot.last7dSummary,
-    },
-    {
-      id: "30d",
-      label: "30D",
-      summary: snapshot.last30dSummary,
-    },
-    {
-      id: "lifetime",
-      label: locale === "zh-CN" ? "累计" : "Lifetime",
-      summary: snapshot.lifetimeSummary,
-    },
-  ];
-
-  return (
-    <section className="source-summary-section">
-      <SectionHeader label={sc.summaryWindows} />
-      <div className="source-summary-grid">
-        {cards.map(({ id, label, summary }) => {
-          const delta = summary.deltaVsPreviousPeriod;
-          const deltaTone =
-            delta == null
-              ? "muted"
-              : delta.tokensDelta > 0
-                ? "up"
-                : delta.tokensDelta < 0
-                  ? "down"
-                  : "flat";
-          const peakLabel = summary.peakDay
-            ? `${sc.peakDayLabel} ${formatDayStamp(summary.peakDay.date, locale)}`
-            : `${sc.shareLabel} ${formatShare(summary.exactShare, locale)}`;
-
-          return (
-            <article key={id} className="source-summary-card">
-              <div className="source-summary-top">
-                <span className="source-summary-window">{label}</span>
-                <span className={`coverage-pill ${summary.pricingCoverage}`}>
-                  {pricingCoverageLabel(locale, summary.pricingCoverage)}
-                </span>
-              </div>
-              <strong className="source-summary-value">
-                {formatCompactNumber(summary.tokens, locale, 1)}
-              </strong>
-              <p className={`source-summary-cost${summary.costUsd > 0 ? "" : " pending"}`}>
-                {formatCoverageCost(
-                  summary.costUsd,
-                  summary.pricingCoverage,
-                  locale,
-                  estimatedCost,
-                  pricingPending,
-                )}
-              </p>
-              <div className="source-summary-meta">
-                <span>
-                  {formatFriendlyNumber(summary.sessions, locale, 0)} {sc.sessionsLabel}
-                </span>
-                <span>
-                  {formatFriendlyNumber(summary.activeDays, locale, 0)} {sc.activeDaysLabel}
-                </span>
-                <span>{peakLabel}</span>
-              </div>
-              <p className={`source-summary-delta ${deltaTone}`}>
-                {delta
-                  ? `${formatSignedTokenDelta(delta.tokensDelta, locale)} ${
-                      sc.tokensLabel
-                    } · ${
-                      delta.tokensPercentChange == null
-                        ? pricingCoverageLabel(locale, summary.pricingCoverage)
-                        : formatSignedPercent(delta.tokensPercentChange, locale)
-                    }`
-                  : `${formatFriendlyNumber(summary.pricedSessions, locale, 0)} / ${formatFriendlyNumber(
-                      summary.sessions,
-                      locale,
-                      0,
-                    )} ${locale === "zh-CN" ? "会话已定价" : "sessions priced"}`}
-              </p>
-            </article>
-          );
-        })}
-
-        {snapshot.billingState ? (
-          <BillingSummaryCard
-            billingState={snapshot.billingState}
-            locale={locale}
-            sc={sc}
-            pricingPending={pricingPending}
-          />
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
-function PeriodicBreakdown({
-  title,
-  rows,
-  locale,
-  sc,
-  estimatedCost,
-  pricingPending,
-}: {
-  title: string;
-  rows: PeriodicBreakdownRow[];
-  locale: Locale;
-  sc: typeof appCopy["en-US"];
-  estimatedCost: (cost: string) => string;
-  pricingPending: string;
-}) {
-  if (rows.length === 0) {
-    return null;
-  }
-
-  const costLabel = locale === "zh-CN" ? "费用" : "Cost";
-
-  return (
-    <article className="periodic-breakdown">
-      <div className="periodic-breakdown-head">
-        <div>
-          <p className="trend-kicker">{title}</p>
-          <h2 className="periodic-breakdown-title">{title}</h2>
-        </div>
-        <span className="periodic-breakdown-count">{rows.length}</span>
-      </div>
-      <div className="periodic-breakdown-list">
-        {rows.map((row) => (
-          <div
-            key={`${row.label}:${row.startDate}`}
-            className="periodic-breakdown-row"
-          >
-            <div className="periodic-breakdown-period">
-              <strong>{row.label}</strong>
-              <span>
-                {formatPeriodDate(row.startDate, locale)} -{" "}
-                {formatPeriodDate(row.endDate, locale)}
-              </span>
-            </div>
-            <div className="periodic-breakdown-stats">
-              <div className="periodic-breakdown-stat">
-                <span>{sc.tokensLabel}</span>
-                <strong>{formatCompactNumber(row.tokens, locale, 1)}</strong>
-              </div>
-              <div className="periodic-breakdown-stat">
-                <span>{sc.sessionsLabel}</span>
-                <strong>{formatFriendlyNumber(row.sessions, locale, 0)}</strong>
-                <small>
-                  {formatFriendlyNumber(row.activeDays, locale, 0)} {sc.activeDaysLabel}
-                </small>
-              </div>
-              <div className="periodic-breakdown-stat">
-                <span>{costLabel}</span>
-                <strong className={row.costUsd > 0 ? "" : "pending"}>
-                  {formatCoverageCost(
-                    row.costUsd,
-                    row.pricingCoverage,
-                    locale,
-                    estimatedCost,
-                    pricingPending,
-                  )}
-                </strong>
-              </div>
-              <div className="periodic-breakdown-stat">
-                <span>{sc.pricingCoverage}</span>
-                <strong className={`coverage-inline ${row.pricingCoverage}`}>
-                  {pricingCoverageLabel(locale, row.pricingCoverage)}
-                </strong>
-                <small>
-                  {formatFriendlyNumber(row.pricedSessions, locale, 0)} /{" "}
-                  {formatFriendlyNumber(row.sessions, locale, 0)}{" "}
-                  {locale === "zh-CN" ? "已定价" : "priced"}
-                </small>
-              </div>
-            </div>
+      {sessions.slice(0, limit).map((s) => (
+        <div key={`${s.sourceId}:${s.id}`} className="sess-item">
+          <div className="sess-top">
+            <span className="sess-title">{s.title || "Untitled"}</span>
+            <span className="sess-source">{s.source}</span>
           </div>
-        ))}
-      </div>
-    </article>
+          <div className="sess-meta">
+            <span>{s.model}</span>
+            <span>{formatCompactNumber(s.totalTokens, locale, 1)} tokens</span>
+            <span className={`sess-cost${s.costUsd > 0 ? "" : " pending"}`}>
+              {s.costUsd > 0
+                ? estimatedCost(formatUsd(s.costUsd, locale))
+                : pricingPending}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1167,19 +721,13 @@ function SourceDetailPage({
 }: {
   snapshot: SourceDetailSnapshot | null;
   locale: Locale;
-  sc: typeof appCopy["en-US"];
+  sc: typeof showcaseCopy["en-US"];
   copy: ReturnType<typeof getCopy>;
   estimatedCost: (cost: string) => string;
   pricingPending: string;
   emptyMessage: string;
   onNavigateHome: () => void;
 }) {
-  const [sessionSort, setSessionSort] = useState<"recent" | "tokens" | "cost">("recent");
-
-  useEffect(() => {
-    setSessionSort("recent");
-  }, [snapshot?.sourceId]);
-
   if (!snapshot) {
     return (
       <section className="source-detail-page">
@@ -1204,6 +752,7 @@ function SourceDetailPage({
     (lastSeen
       ? `${copy.connectors.lastSeen} ${lastSeen}`
       : `${sc.pricingCoverage}: ${calculationLabel(locale, snapshot.calculationMix)}`);
+
   return (
     <section className="source-detail-page">
       <div className="source-detail-header">
@@ -1242,18 +791,11 @@ function SourceDetailPage({
         )}
       </div>
 
-      <SourceSummaryCards
-        snapshot={snapshot}
-        locale={locale}
-        sc={sc}
-        estimatedCost={estimatedCost}
-        pricingPending={pricingPending}
-      />
-
       <WeeklyBurnCard
         data={snapshot.week}
         locale={locale}
         label={sc.last7Days}
+        title={sc.weekFocusTitle}
         totalLabel={sc.weekTotal}
         avgDayLabel={sc.avgDay}
         estimatedCost={estimatedCost}
@@ -1275,55 +817,14 @@ function SourceDetailPage({
         pricingPending={pricingPending}
       />
 
-      <section className="periodic-breakdown-section">
-        <div className="periodic-breakdown-grid">
-          <PeriodicBreakdown
-            title={sc.weeklyBreakdown}
-            rows={snapshot.periodicBreakdowns.weekly}
-            locale={locale}
-            sc={sc}
-            estimatedCost={estimatedCost}
-            pricingPending={pricingPending}
-          />
-          <PeriodicBreakdown
-            title={sc.monthlyBreakdown}
-            rows={snapshot.periodicBreakdowns.monthly}
-            locale={locale}
-            sc={sc}
-            estimatedCost={estimatedCost}
-            pricingPending={pricingPending}
-          />
-        </div>
-      </section>
-
       <section className="sess-section">
-        <div className="sess-section-head">
-          <SectionHeader label={sc.recentSessions} />
-          <label className="session-sort">
-            <span>{sc.sortByLabel}</span>
-            <select
-              value={sessionSort}
-              onChange={(event) =>
-                setSessionSort(event.target.value as "recent" | "tokens" | "cost")
-              }
-            >
-              <option value="recent">{sc.sortRecent}</option>
-              <option value="tokens">{sc.sortTokens}</option>
-              <option value="cost">{sc.sortCost}</option>
-            </select>
-          </label>
-        </div>
+        <SectionHeader label={sc.recentSessions} />
         {snapshot.sessions.length > 0 ? (
           <SessionFeed
             sessions={snapshot.sessions}
             locale={locale}
             estimatedCost={estimatedCost}
             pricingPending={pricingPending}
-            subagentsLabel={sc.subagentsLabel}
-            hideSubagents={sc.hideSubagents}
-            subagentTag={sc.subagentTag}
-            sort={sessionSort}
-            sourceScoped
             limit={12}
           />
         ) : (
@@ -1452,7 +953,7 @@ export default function App() {
     window.localStorage.setItem("burned.locale", locale);
   }, [locale]);
 
-  const sc = appCopy[locale];
+  const sc = showcaseCopy[locale];
   const copy = getCopy(locale);
   const week = snapshot.week.length > 0 ? snapshot.week : snapshot.dailyHistory.slice(-7);
   const scanLabel =
@@ -1538,6 +1039,7 @@ export default function App() {
             data={week}
             locale={locale}
             label={sc.last7Days}
+            title={sc.weekFocusTitle}
             totalLabel={sc.weekTotal}
             avgDayLabel={sc.avgDay}
             estimatedCost={sc.estimatedCost}
@@ -1575,11 +1077,7 @@ export default function App() {
           {snapshot.sourceStatuses.length > 0 && (
             <section className="conn-section">
               <SectionHeader label={sc.connected} />
-              <ConnectorGrid
-                statuses={snapshot.sourceStatuses}
-                locale={locale}
-                onOpenSource={(sourceId) => navigateToRoute({ kind: "source", sourceId })}
-              />
+              <ConnectorGrid statuses={snapshot.sourceStatuses} locale={locale} />
             </section>
           )}
 
@@ -1591,9 +1089,6 @@ export default function App() {
                 locale={locale}
                 estimatedCost={sc.estimatedCost}
                 pricingPending={sc.pricingPending}
-                subagentsLabel={sc.subagentsLabel}
-                hideSubagents={sc.hideSubagents}
-                subagentTag={sc.subagentTag}
               />
             </section>
           )}

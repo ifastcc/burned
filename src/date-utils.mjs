@@ -44,3 +44,28 @@ export function toIsoDateInTimeZone(date, timeZone) {
 export function toLocalIsoDate(date = new Date()) {
   return toIsoDateInTimeZone(date);
 }
+
+export function resolveSelectedDateAfterRefresh({
+  currentDate,
+  previousLatestDate,
+  nextLatestDate,
+  availableDates,
+}) {
+  if (!nextLatestDate) {
+    return currentDate;
+  }
+
+  if (!currentDate || !availableDates.includes(currentDate)) {
+    return nextLatestDate;
+  }
+
+  if (
+    previousLatestDate &&
+    currentDate === previousLatestDate &&
+    nextLatestDate !== previousLatestDate
+  ) {
+    return nextLatestDate;
+  }
+
+  return currentDate;
+}

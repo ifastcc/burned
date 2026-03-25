@@ -28,6 +28,15 @@ To open the browser-based dashboard directly from the workspace:
 
 That command reuses Burned's Rust collectors, serves the built dashboard locally, computes a fresh snapshot, and opens your default browser. If you want a bare `burned` command everywhere, symlink this launcher into a directory that is already on your `PATH`.
 
+For quick local control while iterating on the browser-mode app:
+
+```bash
+./burned.sh start
+./burned.sh status
+./burned.sh restart
+./burned.sh stop
+```
+
 ## Installable CLI Package
 
 Burned now exposes an npm-style CLI entrypoint:
@@ -52,6 +61,14 @@ Cherry Studio backup directory configuration is persistent:
 ./burned config show
 ./burned config set cherry-backup-dir "/Users/you/Documents/cherry_data_backup"
 ./burned config clear cherry-backup-dir
+```
+
+Release helpers also live at the project root now:
+
+```bash
+./release.sh patch
+./release.sh minor
+./release.sh major
 ```
 
 ## Initial Product Boundary

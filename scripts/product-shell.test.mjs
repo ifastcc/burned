@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { appCopy } from "../src/app-copy.mjs";
+import { showcaseCopy } from "../src/showcase-copy.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = path.join(dirname, "..", "package.json");
@@ -15,12 +15,18 @@ const appSource = fs.readFileSync(appPath, "utf8");
 const schemaSource = fs.readFileSync(schemaPath, "utf8");
 
 test("zh-CN hero copy leads with a punchier today-focused question", () => {
-  assert.equal(appCopy["zh-CN"].tagline, "你今天已经烧掉多少 token？");
+  assert.equal(showcaseCopy["zh-CN"].tagline, "你今天已经烧掉多少 token？");
 });
 
 test("package.json exposes a real app startup flow without replacing pnpm dev", () => {
   assert.equal(packageJson.scripts.dev, "node ./scripts/dev-server.mjs");
   assert.equal(packageJson.scripts["dev:app"], "pnpm build && node ./bin/burned.mjs");
+});
+
+test("package.json exposes release shortcuts for patch, minor, and major publishes", () => {
+  assert.equal(packageJson.scripts["release:patch"], "node ./scripts/release.mjs patch");
+  assert.equal(packageJson.scripts["release:minor"], "node ./scripts/release.mjs minor");
+  assert.equal(packageJson.scripts["release:major"], "node ./scripts/release.mjs major");
 });
 
 test("trend area splits the 7-day and 30-day stories into separate cards", () => {
@@ -33,6 +39,17 @@ test("trend cards expose interactive inspection affordances", () => {
   assert.match(appSource, /className="trend-inspector"/);
   assert.match(appSource, /flame-hitbox/);
   assert.match(appSource, /spark-point-button/);
+});
+
+test("weekly card leads with a day-focus summary instead of repeating the date", () => {
+  assert.match(appSource, /title=\{sc\.weekFocusTitle\}/);
+  assert.match(appSource, /className="weekly-focus-value"/);
+  assert.match(appSource, /className="weekly-focus-meta"/);
+  assert.match(appSource, /const latestDay = data\[data.length - 1\];/);
+  assert.doesNotMatch(
+    appSource,
+    /<h2 className="trend-title">\{formatDayStamp\(activeDay\.date, locale\)\}<\/h2>/,
+  );
 });
 
 test("the app never falls back to mock dashboard data", () => {
@@ -67,55 +84,9 @@ test("source rows drill into a dedicated source detail page", () => {
   assert.match(appSource, /window\.history\.pushState/);
 });
 
-test("connector detail page exposes summary cards and periodic breakdowns", () => {
-  assert.match(appSource, /source-summary-card[\s\S]*Today/);
-  assert.match(appSource, /source-summary-card[\s\S]*7D/);
-  assert.match(appSource, /source-summary-card[\s\S]*30D/);
-  assert.match(appSource, /source-summary-card[\s\S]*Lifetime/);
-  assert.match(appSource, /periodic-breakdown/);
-  assert.match(appSource, /session-sort/);
-});
-
-test("connector cards route into the source detail page", () => {
-  assert.match(appSource, /className="conn-card"/);
-  assert.match(appSource, /function ConnectorGrid\(/);
-  assert.match(appSource, /onOpenSource: \(sourceId: string\) => void;/);
-  assert.match(appSource, /onOpenSource\(st\.id\)/);
-});
-
-test("source rows keep routing into the source detail page", () => {
-  assert.match(appSource, /SourceList/);
-  assert.match(
-    appSource,
-    /onClick=\{\(\) => onOpenSource\(s\.sourceId\)\}[\s\S]*pricingPending=\{sc\.pricingPending\}/,
-  );
-  assert.match(
-    appSource,
-    /s\.costUsd > 0\s*\?\s*estimatedCost\(formatUsd\(s\.costUsd, locale\)\)\s*:\s*pricingPending/,
-  );
-});
-
-test("pricing states stay distinct across actual, pending, and non-USD billing", () => {
-  assert.match(
-    appSource,
-    /function SourceList\([\s\S]*className=\{`source-cost\$\{s\.costUsd > 0 \? "" : " pending"\}`\}/,
-  );
-  assert.match(appSource, /pricingPending=\{sc\.pricingPending\}/);
-  assert.match(
-    appSource,
-    /s\.costUsd > 0\s*\?\s*estimatedCost\(formatUsd\(s\.costUsd, locale\)\)\s*:\s*pricingPending/,
-  );
-  assert.match(
-    appSource,
-    /snapshot\.totalCostToday > 0\s*\?\s*sc\.todayCost\(formatUsd\(snapshot\.totalCostToday, locale\)\)\s*:\s*sc\.pricingPending/,
-  );
-  assert.doesNotMatch(
-    appSource,
-    /function SourceList\([\s\S]*sourceId === "antigravity"[\s\S]*estimatedCost/,
-  );
-  assert.doesNotMatch(
-    appSource,
-    /function SourceList\([\s\S]*sourceId === "antigravity"[\s\S]*formatUsd/,
-  );
-  assert.doesNotMatch(appSource, /Antigravity[\s\S]*\$0\.00/);
+test("frontend passes an explicit time zone through every snapshot request", () => {
+  assert.match(appSource, /Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone/);
+  assert.match(appSource, /invoke<DashboardSnapshot>\("get_dashboard_snapshot", \{ timeZone \}\)/);
+  assert.match(appSource, /invoke<SourceDetailSnapshot>\("get_source_snapshot", \{ sourceId, timeZone \}\)/);
+  assert.match(appSource, /"X-Burned-Time-Zone": timeZone/);
 });

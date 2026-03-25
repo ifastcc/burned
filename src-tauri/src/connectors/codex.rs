@@ -215,6 +215,7 @@ fn query_recent_sessions(connection: &Connection) -> Result<Vec<SessionRecord>> 
                 started_at: started_local.format("%b %-d %H:%M").to_string(),
                 total_tokens: total_tokens.max(0) as u64,
                 cost_usd: 0.0,
+                pricing_coverage: None,
                 calculation_method: CalculationMethod::Native,
                 status: "indexed".into(),
             },
@@ -339,7 +340,7 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
 
 fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<UsageEvent> {
     let mut events = Vec::new();
-    let mut session_id = fallback_session_id.to_string();
+    let mut session_id = String::new();
     let mut session_model = String::from("unknown");
     let mut previous_totals: Option<RawUsage> = None;
 
@@ -363,13 +364,15 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
 
         let entry_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
         if entry_type == "session_meta" {
-            if let Some(meta_id) = value
+            if session_id.is_empty() {
+                if let Some(meta_id) = value
                 .get("payload")
                 .and_then(|payload| payload.get("id"))
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
-            {
-                session_id = meta_id.to_string();
+                {
+                    session_id = meta_id.to_string();
+                }
             }
             continue;
         }
@@ -416,15 +419,13 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
             .and_then(|info| info.get("total_token_usage"))
             .and_then(normalize_raw_usage);
 
-        let raw_usage = if let Some(last_usage) = last_usage {
-            Some(last_usage)
-        } else {
-            total_usage.map(|total_usage| subtract_raw_usage(total_usage, previous_totals.as_ref()))
-        };
-
-        if let Some(total_usage) = total_usage {
+        let raw_usage = if let Some(total_usage) = total_usage {
+            let delta = subtract_raw_usage(total_usage, previous_totals.as_ref());
             previous_totals = Some(total_usage);
-        }
+            Some(delta)
+        } else {
+            last_usage
+        };
 
         let Some(raw_usage) = raw_usage else {
             continue;
@@ -443,7 +444,11 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
             token_breakdown,
             total_tokens,
             calculation_method: CalculationMethod::Native,
-            session_id: session_id.clone(),
+            session_id: if session_id.is_empty() {
+                fallback_session_id.to_string()
+            } else {
+                session_id.clone()
+            },
         });
     }
 
@@ -680,6 +685,33 @@ mod tests {
         assert_eq!(events[0].total_tokens, 1950);
         assert_eq!(events[1].session_id, "thread-456");
         assert_eq!(events[1].total_tokens, 1270);
+    }
+
+    #[test]
+    fn prefers_total_usage_deltas_when_last_usage_snapshots_repeat() {
+        let contents = r#"{"timestamp":"2026-03-23T06:25:22.394Z","type":"session_meta","payload":{"id":"thread-456"}}
+{"timestamp":"2026-03-23T06:41:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700},"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700}}}}
+{"timestamp":"2026-03-23T06:41:39.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700},"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700}}}}
+{"timestamp":"2026-03-23T06:42:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":800,"cached_input_tokens":100,"output_tokens":300,"reasoning_output_tokens":70,"total_tokens":1100},"total_token_usage":{"input_tokens":2000,"cached_input_tokens":300,"output_tokens":800,"reasoning_output_tokens":120,"total_tokens":2800}}}}"#;
+
+        let events = parse_session_usage_events(contents, "fallback-id");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].total_tokens, 1950);
+        assert_eq!(events[1].total_tokens, 1270);
+    }
+
+    #[test]
+    fn keeps_first_session_meta_id_for_forked_rollouts() {
+        let contents = r#"{"timestamp":"2026-03-24T10:29:02.752Z","type":"session_meta","payload":{"id":"child-thread","forked_from_id":"parent-thread"}}
+{"timestamp":"2026-03-24T10:30:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":500,"reasoning_output_tokens":50,"total_tokens":1700}}}}
+{"timestamp":"2026-03-24T10:31:02.752Z","type":"session_meta","payload":{"id":"parent-thread"}}
+{"timestamp":"2026-03-24T10:31:09.961Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":170}}}}"#;
+
+        let events = parse_session_usage_events(contents, "fallback-id");
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.session_id == "child-thread"));
     }
 
     #[test]

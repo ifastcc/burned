@@ -209,7 +209,7 @@ fn build_source_snapshot_from_reports(
     } else {
         None
     };
-    let session_costs = build_session_costs(reports);
+    let session_pricing = build_session_pricing(reports);
     let mut sessions = report.sessions.iter().collect::<Vec<_>>();
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
 
@@ -228,7 +228,7 @@ fn build_source_snapshot_from_reports(
         daily_history,
         sessions: sessions
             .into_iter()
-            .map(|record| attach_session_cost(&record.summary, &session_costs))
+            .map(|record| attach_session_pricing(&record.summary, &session_pricing))
             .collect(),
     })
 }
@@ -665,7 +665,7 @@ fn build_source_usage(
 }
 
 fn build_recent_sessions(reports: &[SourceReport]) -> Vec<SessionSummary> {
-    let session_costs = build_session_costs(reports);
+    let session_pricing = build_session_pricing(reports);
     let mut sessions = reports
         .iter()
         .flat_map(|report| report.sessions.iter())
@@ -674,12 +674,12 @@ fn build_recent_sessions(reports: &[SourceReport]) -> Vec<SessionSummary> {
     sessions
         .into_iter()
         .take(8)
-        .map(|record| attach_session_cost(&record.summary, &session_costs))
+        .map(|record| attach_session_pricing(&record.summary, &session_pricing))
         .collect()
 }
 
 fn build_session_groups(reports: &[SourceReport]) -> Vec<SessionGroup> {
-    let session_costs = build_session_costs(reports);
+    let session_pricing = build_session_pricing(reports);
     let mut groups = reports
         .iter()
         .filter(|report| !matches!(report.status.state, models::SourceState::Missing))
@@ -693,7 +693,7 @@ fn build_session_groups(reports: &[SourceReport]) -> Vec<SessionGroup> {
                 source_state: report.status.state,
                 sessions: sessions
                     .into_iter()
-                    .map(|record| attach_session_cost(&record.summary, &session_costs))
+                    .map(|record| attach_session_pricing(&record.summary, &session_pricing))
                     .collect(),
             }
         })
@@ -724,28 +724,44 @@ fn count_sessions_for_day(usage_events: &[&connectors::UsageEvent], day: chrono:
         .len() as u32
 }
 
-fn build_session_costs(reports: &[SourceReport]) -> HashMap<String, f64> {
-    let mut costs = HashMap::<String, f64>::new();
-    for report in reports {
-        for event in &report.usage_events {
-            let Some(cost_usd) = event.estimated_cost_usd() else {
-                continue;
-            };
-            *costs
-                .entry(session_cost_key(event.source_id, &event.session_id))
-                .or_insert(0.0) += cost_usd;
-        }
-    }
-    costs
+#[derive(Clone, Copy, Default)]
+struct SessionPricing {
+    cost_usd: f64,
+    total_events: u32,
+    priced_events: u32,
 }
 
-fn attach_session_cost(
+fn build_session_pricing(reports: &[SourceReport]) -> HashMap<String, SessionPricing> {
+    let mut pricing = HashMap::<String, SessionPricing>::new();
+    for report in reports {
+        for event in &report.usage_events {
+            let entry = pricing
+                .entry(session_cost_key(event.source_id, &event.session_id))
+                .or_default();
+            entry.total_events += 1;
+            if let Some(cost_usd) = event.estimated_cost_usd() {
+                entry.priced_events += 1;
+                entry.cost_usd += cost_usd;
+            }
+        }
+    }
+    pricing
+}
+
+fn attach_session_pricing(
     summary: &SessionSummary,
-    session_costs: &HashMap<String, f64>,
+    session_pricing: &HashMap<String, SessionPricing>,
 ) -> SessionSummary {
     let mut summary = summary.clone();
-    if let Some(cost_usd) = session_costs.get(&session_cost_key(&summary.source_id, &summary.id)) {
-        summary.cost_usd = *cost_usd;
+    if let Some(pricing) = session_pricing.get(&session_cost_key(&summary.source_id, &summary.id))
+    {
+        if pricing.priced_events > 0 {
+            summary.cost_usd = pricing.cost_usd;
+        }
+        summary.pricing_coverage = Some(pricing_coverage(
+            pricing.total_events as usize,
+            pricing.priced_events as usize,
+        ));
     }
     summary
 }
@@ -842,6 +858,7 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 1_750,
                     cost_usd: 0.0,
+                    pricing_coverage: None,
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },
@@ -891,6 +908,7 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 8_000,
                     cost_usd: 0.0,
+                    pricing_coverage: None,
                     calculation_method: CalculationMethod::Estimated,
                     status: "indexed".into(),
                 },
@@ -942,6 +960,7 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 1_750,
                     cost_usd: 0.0,
+                    pricing_coverage: None,
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },
@@ -1081,6 +1100,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_summaries_expose_pricing_coverage() {
+        let now = Local
+            .with_ymd_and_hms(2026, 3, 24, 12, 0, 0)
+            .single()
+            .expect("local datetime");
+        let occurred_at = now.with_timezone(&Utc);
+        let report = SourceReport {
+            status: ready_status("codex", "Codex"),
+            usage_events: vec![
+                UsageEvent {
+                    source_id: "codex",
+                    occurred_at,
+                    model: "gpt-5.4".into(),
+                    token_breakdown: TokenBreakdown {
+                        input_tokens: 1_000,
+                        cached_input_tokens: 500,
+                        output_tokens: 250,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens: 1_750,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: "actual".into(),
+                },
+                UsageEvent {
+                    source_id: "codex",
+                    occurred_at,
+                    model: "gpt-5.4".into(),
+                    token_breakdown: TokenBreakdown {
+                        input_tokens: 800,
+                        cached_input_tokens: 100,
+                        output_tokens: 120,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens: 1_020,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: "partial".into(),
+                },
+                UsageEvent {
+                    source_id: "codex",
+                    occurred_at,
+                    model: "unknown".into(),
+                    token_breakdown: TokenBreakdown {
+                        other_tokens: 700,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens: 700,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: "partial".into(),
+                },
+                UsageEvent {
+                    source_id: "codex",
+                    occurred_at,
+                    model: "unknown".into(),
+                    token_breakdown: TokenBreakdown {
+                        other_tokens: 500,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens: 500,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: "pending".into(),
+                },
+            ],
+            sessions: vec![
+                session_record("codex", "Codex", "actual", occurred_at, 1_750, "gpt-5.4"),
+                session_record("codex", "Codex", "partial", occurred_at, 1_720, "gpt-5.4"),
+                session_record("codex", "Codex", "pending", occurred_at, 500, "unknown"),
+            ],
+        };
+
+        let snapshot =
+            build_source_snapshot_from_reports(&[report], now, "codex").expect("source snapshot");
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let sessions = json
+            .get("sessions")
+            .and_then(|value| value.as_array())
+            .expect("sessions array");
+
+        assert_eq!(
+            session_json(sessions, "actual")
+                .get("pricingCoverage")
+                .and_then(|value| value.as_str()),
+            Some("actual")
+        );
+        assert_eq!(
+            session_json(sessions, "partial")
+                .get("pricingCoverage")
+                .and_then(|value| value.as_str()),
+            Some("partial")
+        );
+        assert_eq!(
+            session_json(sessions, "pending")
+                .get("pricingCoverage")
+                .and_then(|value| value.as_str()),
+            Some("pending")
+        );
+    }
+
     fn ready_status(id: &str, name: &str) -> SourceStatus {
         SourceStatus {
             id: id.into(),
@@ -1116,23 +1233,14 @@ mod tests {
                 calculation_method: CalculationMethod::Native,
                 session_id: format!("{id}-session"),
             }],
-            sessions: vec![SessionRecord {
-                updated_at: occurred_at,
-                summary: SessionSummary {
-                    id: format!("{id}-session"),
-                    source_id: id.into(),
-                    title: "Session".into(),
-                    preview: "Preview".into(),
-                    source: name.into(),
-                    workspace: "burned".into(),
-                    model: "gpt-5.4".into(),
-                    started_at: "Mar 24 12:00".into(),
-                    total_tokens: 1_750,
-                    cost_usd: 0.0,
-                    calculation_method: CalculationMethod::Native,
-                    status: "indexed".into(),
-                },
-            }],
+            sessions: vec![session_record(
+                id,
+                name,
+                &format!("{id}-session"),
+                occurred_at,
+                1_750,
+                "gpt-5.4",
+            )],
         }
     }
 
@@ -1144,23 +1252,14 @@ mod tests {
         SourceReport {
             status: ready_status(id, name),
             usage_events: Vec::new(),
-            sessions: vec![SessionRecord {
+            sessions: vec![session_record(
+                id,
+                name,
+                &format!("{id}-session"),
                 updated_at,
-                summary: SessionSummary {
-                    id: format!("{id}-session"),
-                    source_id: id.into(),
-                    title: "Session".into(),
-                    preview: "Preview".into(),
-                    source: name.into(),
-                    workspace: "burned".into(),
-                    model: "unknown".into(),
-                    started_at: "Mar 24 12:00".into(),
-                    total_tokens: 0,
-                    cost_usd: 0.0,
-                    calculation_method: CalculationMethod::Estimated,
-                    status: "indexed".into(),
-                },
-            }],
+                0,
+                "unknown",
+            )],
         }
     }
 
@@ -1188,6 +1287,48 @@ mod tests {
                 })
             })
             .expect("source row")
+    }
+
+    fn session_json<'a>(
+        sessions_json: &'a [serde_json::Value],
+        session_id: &str,
+    ) -> &'a serde_json::Value {
+        sessions_json
+            .iter()
+            .find(|row| row.get("id").and_then(|value| value.as_str()) == Some(session_id))
+            .expect("session row")
+    }
+
+    fn session_record(
+        source_id: &str,
+        source_name: &str,
+        session_id: &str,
+        updated_at: chrono::DateTime<Utc>,
+        total_tokens: u64,
+        model: &str,
+    ) -> SessionRecord {
+        SessionRecord {
+            updated_at,
+            summary: SessionSummary {
+                id: session_id.into(),
+                source_id: source_id.into(),
+                title: "Session".into(),
+                preview: "Preview".into(),
+                source: source_name.into(),
+                workspace: "burned".into(),
+                model: model.into(),
+                started_at: "Mar 24 12:00".into(),
+                total_tokens,
+                cost_usd: 0.0,
+                pricing_coverage: None,
+                calculation_method: if model == "unknown" {
+                    CalculationMethod::Estimated
+                } else {
+                    CalculationMethod::Native
+                },
+                status: "indexed".into(),
+            },
+        }
     }
 
     fn approx_eq(left: f64, right: f64) {

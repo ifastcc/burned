@@ -107,3 +107,8 @@ test("source usage rows and detail snapshots carry analytics-state fields", () =
   assert.match(schemaSource, /last30dSummary:/);
   assert.match(schemaSource, /lifetimeSummary:/);
 });
+
+test("session summaries carry pricing coverage instead of implying every cost is complete", () => {
+  assert.match(schemaSource, /pricingCoverage: PricingCoverage \| null;/);
+  assert.match(appSource, /pricingCoverageText\(copy, s\.pricingCoverage/);
+});

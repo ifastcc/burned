@@ -579,12 +579,14 @@ function MonthlyTrendCard({
 function SourceList({
   sources,
   locale,
+  sc,
   estimatedCost,
   pricingPending,
   onOpenSource,
 }: {
   sources: SourceUsage[];
   locale: Locale;
+  sc: typeof showcaseCopy["en-US"];
   estimatedCost: (cost: string) => string;
   pricingPending: string;
   onOpenSource: (sourceId: string) => void;
@@ -599,7 +601,7 @@ function SourceList({
         const icon =
           s.trend === "up" ? "↑" : s.trend === "down" ? "↓" : s.trend === "flat" ? "→" : null;
         const statusCopy =
-          s.analyticsState === "session_only" ? "analytics pending" : "data unavailable";
+          s.analyticsState === "session_only" ? sc.analyticsPending : sc.analyticsUnavailable;
         const costLabel =
           s.analyticsState !== "ready"
             ? statusCopy
@@ -650,35 +652,47 @@ function SourceList({
 function SessionFeed({
   sessions,
   locale,
+  copy,
   estimatedCost,
   pricingPending,
   limit = 6,
 }: {
   sessions: SessionSummary[];
   locale: Locale;
+  copy: ReturnType<typeof getCopy>;
   estimatedCost: (cost: string) => string;
   pricingPending: string;
   limit?: number;
 }) {
   return (
     <div className="sess-feed">
-      {sessions.slice(0, limit).map((s) => (
-        <div key={`${s.sourceId}:${s.id}`} className="sess-item">
-          <div className="sess-top">
-            <span className="sess-title">{s.title || "Untitled"}</span>
-            <span className="sess-source">{s.source}</span>
+      {sessions.slice(0, limit).map((s) => {
+        const coverageLabel =
+          s.pricingCoverage === "partial"
+            ? pricingCoverageText(copy, s.pricingCoverage)
+            : null;
+        const showPending =
+          s.pricingCoverage === "pending" || (s.pricingCoverage == null && s.costUsd <= 0);
+        const costLabel =
+          s.costUsd > 0 ? estimatedCost(formatUsd(s.costUsd, locale)) : pricingPending;
+
+        return (
+          <div key={`${s.sourceId}:${s.id}`} className="sess-item">
+            <div className="sess-top">
+              <span className="sess-title">{s.title || "Untitled"}</span>
+              <span className="sess-source">{s.source}</span>
+            </div>
+            <div className="sess-meta">
+              <span>{s.model}</span>
+              <span>{formatCompactNumber(s.totalTokens, locale, 1)} tokens</span>
+              <span className={`sess-cost${showPending ? " pending" : ""}`}>
+                {costLabel}
+                {coverageLabel ? ` · ${coverageLabel}` : ""}
+              </span>
+            </div>
           </div>
-          <div className="sess-meta">
-            <span>{s.model}</span>
-            <span>{formatCompactNumber(s.totalTokens, locale, 1)} tokens</span>
-            <span className={`sess-cost${s.costUsd > 0 ? "" : " pending"}`}>
-              {s.costUsd > 0
-                ? estimatedCost(formatUsd(s.costUsd, locale))
-                : pricingPending}
-            </span>
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -945,6 +959,7 @@ function SourceDetailPage({
           <SessionFeed
             sessions={snapshot.sessions}
             locale={locale}
+            copy={copy}
             estimatedCost={estimatedCost}
             pricingPending={pricingPending}
             limit={12}
@@ -1186,6 +1201,7 @@ export default function App() {
               <SourceList
                 sources={snapshot.sources}
                 locale={locale}
+                sc={sc}
                 estimatedCost={sc.estimatedCost}
                 pricingPending={sc.pricingPending}
                 onOpenSource={(sourceId) => navigateToRoute({ kind: "source", sourceId })}
@@ -1199,6 +1215,7 @@ export default function App() {
               <SessionFeed
                 sessions={snapshot.sessions}
                 locale={locale}
+                copy={copy}
                 estimatedCost={sc.estimatedCost}
                 pricingPending={sc.pricingPending}
               />

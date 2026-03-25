@@ -7,7 +7,9 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::connectors::{SessionRecord, SourceConnector, SourceReport};
-use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::models::{
+    CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus,
+};
 
 const SOURCE_ID: &str = "cursor";
 const SOURCE_NAME: &str = "Cursor";
@@ -215,6 +217,7 @@ fn query_sessions(
                     .to_string(),
                 total_tokens: cursor_total_tokens(&value),
                 cost_usd: cursor_cost_usd(&value),
+                pricing_coverage: cursor_pricing_coverage(&value),
                 calculation_method: CalculationMethod::Derived,
                 status: "indexed".into(),
             },
@@ -357,10 +360,40 @@ fn cursor_cost_usd(value: &Value) -> f64 {
     (total_cents as f64) / 100.0
 }
 
+fn cursor_pricing_coverage(value: &Value) -> Option<PricingCoverage> {
+    let usage_data = value.get("usageData").and_then(Value::as_object)?;
+    if usage_data.is_empty() {
+        return Some(PricingCoverage::Pending);
+    }
+
+    let priced_entries = usage_data
+        .values()
+        .filter_map(|entry| entry.get("costInCents"))
+        .filter_map(|value| match value {
+            Value::Number(number) => number.as_i64(),
+            Value::String(raw) => raw.trim().parse::<i64>().ok(),
+            _ => None,
+        })
+        .filter(|cost_in_cents| *cost_in_cents > 0)
+        .count();
+
+    Some(match priced_entries {
+        0 => PricingCoverage::Pending,
+        count if count == usage_data.len() => PricingCoverage::Actual,
+        _ => PricingCoverage::Partial,
+    })
+}
+
 fn cursor_model_label(value: &Value) -> String {
     let Some(usage_data) = value.get("usageData").and_then(Value::as_object) else {
         return "unknown".into();
     };
+    if usage_data.is_empty() {
+        return "unknown".into();
+    }
+    if usage_data.len() > 1 {
+        return "mixed".into();
+    }
 
     let labels = usage_data
         .keys()
@@ -575,5 +608,17 @@ mod tests {
         assert_eq!(third.total_tokens, 0);
         assert_eq!(third.cost_usd, 0.0);
         assert_eq!(third.calculation_method, CalculationMethod::Derived);
+    }
+
+    #[test]
+    fn cursor_model_label_treats_multiple_usage_keys_as_mixed() {
+        let value = serde_json::json!({
+            "usageData": {
+                "   ": { "costInCents": 3 },
+                "gpt-4o": { "costInCents": 7 }
+            }
+        });
+
+        assert_eq!(cursor_model_label(&value), "mixed");
     }
 }

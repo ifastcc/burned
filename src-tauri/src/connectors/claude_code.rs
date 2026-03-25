@@ -351,6 +351,7 @@ fn to_session_record(session: SessionAccumulator) -> Option<SessionRecord> {
                 .to_string(),
             total_tokens: session.total_tokens,
             cost_usd: 0.0,
+            pricing_coverage: None,
             calculation_method: CalculationMethod::Native,
             status: "indexed".into(),
         },

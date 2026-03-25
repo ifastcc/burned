@@ -192,6 +192,7 @@ fn antigravity_sessions() -> Vec<SessionRecord> {
                     .to_string(),
                 total_tokens: 0,
                 cost_usd: 0.0,
+                pricing_coverage: None,
                 calculation_method: CalculationMethod::Estimated,
                 status: "indexed".into(),
             },

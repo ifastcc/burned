@@ -125,6 +125,7 @@ pub struct SessionSummary {
     pub started_at: String,
     pub total_tokens: u64,
     pub cost_usd: f64,
+    pub pricing_coverage: Option<PricingCoverage>,
     pub calculation_method: CalculationMethod,
     pub status: String,
 }

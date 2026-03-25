@@ -79,6 +79,7 @@ export type SessionSummary = {
   startedAt: string;
   totalTokens: number;
   costUsd: number;
+  pricingCoverage: PricingCoverage | null;
   calculationMethod: CalculationMethod;
   status: "indexed" | "recomputed" | "pending";
 };

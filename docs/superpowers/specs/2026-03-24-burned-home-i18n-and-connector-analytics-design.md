@@ -89,6 +89,7 @@ These workstreams should share one release goal but remain separable during impl
   - `de-DE`
   - `fr-FR`
   - `es-ES`
+- Ship complete app-shell copy packs for every locale in that initial set. English fallback is only for unsupported detected locales, not for missing strings inside a supported locale.
 - Detect the current computer locale at startup and map it through exact-match, language-family fallback, then English fallback.
 - Preserve a manual locale override in local settings.
 - Refactor UI copy and formatting so the locale system scales beyond two languages.
@@ -123,9 +124,10 @@ The homepage should no longer answer a second time which connectors merely exist
 #### Homepage Entry Surface Rules
 
 - The source list remains the only connector detail entry surface.
-- Every non-missing connector should still be representable in that list, even if its usage analytics are still pending.
+- Every non-missing connector should still be representable in that list, even if its usage analytics are still pending or unavailable.
 - Rows with ready analytics show tokens, pricing state, and trend.
 - Rows with session-only coverage remain clickable but should show an explicit analytics-pending state instead of pretending they had zero usage.
+- Rows with unavailable analytics remain clickable for diagnosis but render a stronger data-unavailable state.
 
 ### Locale Experience
 
@@ -134,6 +136,7 @@ The homepage should no longer answer a second time which connectors merely exist
   - Example: `fr-CA` falls back to `fr-FR`
   - Example: `es-MX` falls back to `es-ES`
 - If there is no supported family fallback, Burned uses `en-US`.
+- Supported locales in the initial set must ship with complete shell copy. Burned should not mix a supported locale with English fallback strings because that turns localization gaps into a production UI state.
 - A user-facing locale switcher remains available.
 - The persisted manual-override key remains `burned.locale` unless a broader settings migration is introduced later.
 - Once a user chooses a locale manually, future launches should honor that override rather than re-detecting the system locale each time.
@@ -162,15 +165,20 @@ The snapshot contract should stop treating missing analytics as zero-filled anal
 
 ### Source Usage Row Contract
 
-Extend the homepage source-row contract with an explicit analytics state:
+Extend the homepage source-row contract with an explicit analytics state and state-aware metrics:
 
 - `analyticsState`: `ready` | `session_only` | `unavailable`
+- `tokens`: `number | null`
+- `costUsd`: `number | null`
+- `sessions`: `number | null`
+- `trend`: `up` | `flat` | `down` | `null`
+- `pricingCoverage`: `actual` | `partial` | `pending` | `null`
 
 Row behavior:
 
-- `ready`: tokens, pricing state, and trend are meaningful
-- `session_only`: row is still clickable, but the row copy indicates that session indexing is available while aggregated usage is pending
-- `unavailable`: row is still clickable if the connector is non-missing, but it renders a stronger data-unavailable state and does not claim either usage or indexed-session coverage
+- `ready`: tokens, session count, trend, and row-level pricing state are meaningful; `pricingCoverage` is always non-null, and `costUsd` is only non-null when the pricing coverage is `actual` or `partial`
+- `session_only`: row is still clickable, row copy indicates that session indexing is available while aggregated usage is pending, the quantitative fields are `null` rather than zero-filled, and `pricingCoverage` is `null` because no row-level pricing total is authoritative yet
+- `unavailable`: row is still clickable if the connector is non-missing, it renders a stronger data-unavailable state, the quantitative fields are `null`, and `pricingCoverage` is `null`
 
 Missing connectors should remain excluded from the homepage source list.
 
@@ -183,7 +191,7 @@ Add a dedicated detail analytics state to `SourceDetailSnapshot`:
 Semantics:
 
 - `ready`: daily history and summary windows are safe to interpret
-- `session_only`: session browsing is available, but aggregated daily usage is not yet ready
+- `session_only`: at least one meaningful indexed-session surface is available, but aggregated daily usage is not yet ready
 - `unavailable`: neither meaningful sessions nor usage analytics are currently available
 
 ### Summary Windows
@@ -203,6 +211,7 @@ Rules:
 
 - A `null` summary means analytics are not currently available for that window.
 - A zero-valued summary means analytics are available and the true value is zero.
+- Field semantics, pricing-coverage states, and period-comparison behavior remain aligned with the earlier connector-detail pricing design.
 
 ### Daily History
 
@@ -222,6 +231,12 @@ Keep the periodic breakdown design from the earlier connector-detail spec:
 
 But these breakdown sets should also be nullable or empty when analytics are not ready.
 
+Calendar-boundary rules remain aligned with the earlier connector-detail pricing design:
+
+- weekly periods are calendar-aligned local weeks with Monday as the start of week
+- monthly periods are calendar-aligned local months
+- the newest row may be an in-progress partial period
+
 ### Pricing Coverage
 
 Keep the earlier pricing-coverage model:
@@ -234,6 +249,7 @@ This pricing state is separate from analytics availability:
 
 - a connector can have `analyticsState = ready` and `pricingCoverage = pending`
 - a connector can have `analyticsState = session_only`, in which case summary-window pricing is not rendered as authoritative because the window itself is unavailable
+- row-level pricing follows the same rule: when row analytics are not ready, row pricing is not authoritative and `pricingCoverage` is `null`
 
 ## Connector-Specific Behavior
 
@@ -273,6 +289,7 @@ Expected outcome:
 - Burned attempts to recover trustworthy usage-event data from confirmed local artifacts
 - if daily analytics cannot be reconstructed faithfully, Antigravity remains `session_only`
 - Antigravity pricing remains `pending` unless a separate stable local pricing or quota source is verified
+- when Antigravity pricing is unknown, `costUsd` stays `null`; it must never be encoded as `0` just to satisfy a numeric field
 
 Antigravity must not be shown as `$0.00` simply because pricing is unknown.
 
@@ -281,12 +298,13 @@ Antigravity must not be shown as `$0.00` simply because pricing is unknown.
 ### Homepage Source Rows
 
 - The homepage source list remains clickable for every non-missing connector.
-- Ready connectors render their normal quantitative row.
+- Ready connectors render their normal quantitative row, including pricing state derived from row-level `pricingCoverage`.
 - Session-only connectors render a subdued pending state:
   - no misleading “zero burn” framing
+  - no numeric totals, session counts, or trend glyphs
   - explicit copy that analytics are pending
   - still routes to the detail page
-- Unavailable connectors render a stronger data-unavailable state, remain clickable for diagnosis, and do not pretend to expose usable totals.
+- Unavailable connectors render a stronger data-unavailable state, remain clickable for diagnosis, and show neither quantitative totals nor trend glyphs.
 
 ### Homepage Connector Grid
 

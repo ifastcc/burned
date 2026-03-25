@@ -1,4 +1,9 @@
-import type { CalculationMethod, SessionSummary, SourceState } from "./data/schema";
+import type {
+  CalculationMethod,
+  PricingCoverage,
+  SessionSummary,
+  SourceState
+} from "./data/schema";
 
 export type Locale = "en-US" | "zh-CN";
 export type Granularity = "day" | "week" | "month";
@@ -412,6 +417,49 @@ export function calculationLabel(
   }
 
   return copies[locale].common[method];
+}
+
+export function pricingCoverageLabel(
+  locale: Locale,
+  coverage: PricingCoverage
+) {
+  if (locale === "zh-CN") {
+    return {
+      complete: "价格完整",
+      partial: "价格部分可用",
+      pending: "价格待补全"
+    }[coverage];
+  }
+
+  return {
+    complete: "priced",
+    partial: "partial pricing",
+    pending: "pricing pending"
+  }[coverage];
+}
+
+export function longContextSummaryLabel(
+  locale: Locale,
+  sessionCount: number,
+  extraCost: string
+) {
+  if (locale === "zh-CN") {
+    return `${sessionCount} 个 272K+ session · 多计 ${extraCost}`;
+  }
+
+  return `${sessionCount} long-context session${sessionCount === 1 ? "" : "s"} · +${extraCost}`;
+}
+
+export function longContextSessionLabel(
+  locale: Locale,
+  peakInputTokens: string,
+  extraCost: string
+) {
+  if (locale === "zh-CN") {
+    return `272K+ 输入峰值 ${peakInputTokens} · 多计 ${extraCost}`;
+  }
+
+  return `272K+ input peak ${peakInputTokens} · +${extraCost}`;
 }
 
 export function sessionStatusLabel(

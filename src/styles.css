@@ -353,6 +353,25 @@ button {
   color: var(--text-muted);
 }
 
+.burn-cost.partial {
+  color: var(--ember);
+}
+
+.context-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--sp-md);
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 107, 44, 0.24);
+  background: rgba(255, 107, 44, 0.09);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ember);
+  letter-spacing: 0.03em;
+}
+
 /* ============================================
    Trend panel
    ============================================ */
@@ -464,6 +483,10 @@ button {
   color: var(--text-muted);
 }
 
+.weekly-focus-cost.partial {
+  color: var(--ember);
+}
+
 .trend-inspector {
   display: inline-grid;
   gap: 4px;
@@ -493,6 +516,10 @@ button {
 
 .trend-inspector-cost.pending {
   color: var(--text-muted);
+}
+
+.trend-inspector-cost.partial {
+  color: var(--ember);
 }
 
 .trend-stat-grid {
@@ -864,6 +891,10 @@ button {
   color: var(--text-muted);
 }
 
+.source-cost.partial {
+  color: var(--ember);
+}
+
 .source-bar-bg {
   height: 7px;
   border-radius: 4px;
@@ -1180,6 +1211,18 @@ button {
 
 .sess-cost.pending {
   color: var(--text-muted);
+}
+
+.sess-cost.partial {
+  color: var(--ember);
+}
+
+.sess-long-context {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ember);
+  letter-spacing: 0.03em;
 }
 
 /* ============================================

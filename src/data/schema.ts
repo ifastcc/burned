@@ -1,10 +1,22 @@
 export type CalculationMethod = "native" | "derived" | "estimated";
 export type SourceState = "ready" | "partial" | "missing";
+export type PricingCoverage = "complete" | "partial" | "pending";
+
+export type LongContextSummary = {
+  sessionCount: number;
+  extraCostUsd: number;
+};
+
+export type LongContextSessionSummary = {
+  peakInputTokens: number;
+  extraCostUsd: number;
+};
 
 export type DailyUsagePoint = {
   date: string;
   totalTokens: number;
   totalCostUsd: number;
+  pricingCoverage: PricingCoverage;
   exactShare: number;
   activeSources: number;
   sessionCount: number;
@@ -15,6 +27,7 @@ export type SourceUsage = {
   source: string;
   tokens: number;
   costUsd: number;
+  pricingCoverage: PricingCoverage;
   sessions: number;
   trend: "up" | "flat" | "down";
   calculationMix: CalculationMethod | "mixed";
@@ -31,6 +44,8 @@ export type SessionSummary = {
   startedAt: string;
   totalTokens: number;
   costUsd: number;
+  pricingCoverage: PricingCoverage;
+  longContext?: LongContextSessionSummary | null;
   calculationMethod: CalculationMethod;
   status: "indexed" | "recomputed" | "pending";
 };
@@ -57,6 +72,8 @@ export type DashboardSnapshot = {
   headlineDate: string;
   totalTokensToday: number;
   totalCostToday: number;
+  pricingCoverage: PricingCoverage;
+  longContextToday: LongContextSummary;
   exactShare: number;
   connectedSources: number;
   activeSources: number;
@@ -76,6 +93,8 @@ export type SourceDetailSnapshot = {
   calculationMix: CalculationMethod | "mixed";
   todayTokens: number;
   todayCostUsd: number;
+  pricingCoverage: PricingCoverage;
+  longContext: LongContextSummary;
   week: DailyUsagePoint[];
   dailyHistory: DailyUsagePoint[];
   sessions: SessionSummary[];

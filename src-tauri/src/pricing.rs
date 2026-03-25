@@ -8,14 +8,20 @@ pub struct TokenBreakdown {
 }
 
 impl TokenBreakdown {
-    pub fn total_tokens(&self) -> u64 {
+    pub fn raw_input_tokens(&self) -> u64 {
         self.input_tokens
             .saturating_add(self.cache_creation_input_tokens)
             .saturating_add(self.cached_input_tokens)
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.raw_input_tokens()
             .saturating_add(self.output_tokens)
             .saturating_add(self.other_tokens)
     }
 }
+
+pub const LONG_CONTEXT_INPUT_THRESHOLD: u64 = 272_000;
 
 #[derive(Clone, Copy, Debug)]
 struct ModelPricing {
@@ -23,6 +29,19 @@ struct ModelPricing {
     cached_input_per_million: Option<f64>,
     cache_write_input_per_million: Option<f64>,
     output_per_million: f64,
+}
+
+impl ModelPricing {
+    fn with_long_context_uplift(self) -> Self {
+        Self {
+            input_per_million: self.input_per_million * 2.0,
+            // OpenAI's long-context note calls out standard input/output uplift
+            // explicitly, but does not publish a separate cached-input uplift.
+            cached_input_per_million: self.cached_input_per_million,
+            cache_write_input_per_million: self.cache_write_input_per_million,
+            output_per_million: self.output_per_million * 1.5,
+        }
+    }
 }
 
 const MODEL_PRICING: &[(&str, ModelPricing)] = &[
@@ -51,6 +70,24 @@ const MODEL_PRICING: &[(&str, ModelPricing)] = &[
             cached_input_per_million: Some(0.02),
             cache_write_input_per_million: None,
             output_per_million: 1.25,
+        },
+    ),
+    (
+        "gpt-5.2",
+        ModelPricing {
+            input_per_million: 1.75,
+            cached_input_per_million: Some(0.175),
+            cache_write_input_per_million: None,
+            output_per_million: 14.00,
+        },
+    ),
+    (
+        "gpt-5.2-codex",
+        ModelPricing {
+            input_per_million: 1.75,
+            cached_input_per_million: Some(0.175),
+            cache_write_input_per_million: None,
+            output_per_million: 14.00,
         },
     ),
     (
@@ -228,15 +265,20 @@ pub fn normalize_model_name(model: &str) -> Option<String> {
 }
 
 pub fn estimate_cost_usd(model: &str, breakdown: TokenBreakdown) -> Option<f64> {
+    estimate_cost_usd_with_long_context(model, breakdown, false)
+}
+
+pub fn estimate_cost_usd_with_long_context(
+    model: &str,
+    breakdown: TokenBreakdown,
+    long_context_session: bool,
+) -> Option<f64> {
     if breakdown.other_tokens > 0 {
         return None;
     }
 
     let canonical = normalize_model_name(model)?;
-    let pricing = MODEL_PRICING
-        .iter()
-        .find(|(name, _)| *name == canonical)
-        .map(|(_, pricing)| pricing)?;
+    let pricing = pricing_for_model(&canonical, long_context_session)?;
 
     let cache_write_rate = pricing
         .cache_write_input_per_million
@@ -253,11 +295,38 @@ pub fn estimate_cost_usd(model: &str, breakdown: TokenBreakdown) -> Option<f64> 
     Some(total / 1_000_000.0)
 }
 
+pub fn supports_long_context_pricing(model: &str) -> bool {
+    matches!(
+        normalize_model_name(model).as_deref(),
+        Some("gpt-5.4") | Some("gpt-5.4-pro")
+    )
+}
+
+pub fn triggers_long_context_pricing(model: &str, raw_input_tokens: u64) -> bool {
+    supports_long_context_pricing(model) && raw_input_tokens > LONG_CONTEXT_INPUT_THRESHOLD
+}
+
+fn pricing_for_model(model: &str, long_context_session: bool) -> Option<ModelPricing> {
+    let pricing = MODEL_PRICING
+        .iter()
+        .find(|(name, _)| *name == model)
+        .map(|(_, pricing)| *pricing)?;
+
+    Some(if long_context_session && supports_long_context_pricing(model) {
+        pricing.with_long_context_uplift()
+    } else {
+        pricing
+    })
+}
+
 fn normalize_openai_model(model: &str) -> Option<&'static str> {
     match model {
         "gpt-5.4" | "gpt-5-4" | "gpt-5.4-thinking" | "gpt-5-4-thinking" => Some("gpt-5.4"),
+        "gpt-5.4-pro" | "gpt-5-4-pro" => Some("gpt-5.4-pro"),
         "gpt-5.4-mini" | "gpt-5-4-mini" => Some("gpt-5.4-mini"),
         "gpt-5.4-nano" | "gpt-5-4-nano" => Some("gpt-5.4-nano"),
+        "gpt-5.2" | "gpt-5-2" | "gpt-5.2-thinking" | "gpt-5-2-thinking" => Some("gpt-5.2"),
+        "gpt-5.2-codex" | "gpt-5-2-codex" => Some("gpt-5.2-codex"),
         "gpt-5.1" | "gpt-5-1" | "gpt-5.1-thinking" | "gpt-5-1-thinking" => Some("gpt-5.1"),
         "gpt-5.1-mini" | "gpt-5-1-mini" => Some("gpt-5.1-mini"),
         "gpt-5.1-codex" | "gpt-5-1-codex" => Some("gpt-5.1-codex"),
@@ -316,6 +385,7 @@ mod tests {
     #[test]
     fn normalizes_openai_and_anthropic_aliases() {
         assert_eq!(normalize_model_name("gpt-5-4-thinking").as_deref(), Some("gpt-5.4"));
+        assert_eq!(normalize_model_name("gpt-5-2-codex").as_deref(), Some("gpt-5.2-codex"));
         assert_eq!(
             normalize_model_name("anthropic/claude-sonnet-4.6").as_deref(),
             Some("claude-sonnet-4.6")
@@ -357,6 +427,42 @@ mod tests {
         .expect("claude-sonnet-4.6 should be priced");
 
         approx_eq(cost, 0.006_435);
+    }
+
+    #[test]
+    fn estimates_gpt_5_2_codex_cost() {
+        let cost = estimate_cost_usd(
+            "gpt-5.2-codex",
+            TokenBreakdown {
+                input_tokens: 1_000,
+                cached_input_tokens: 500,
+                output_tokens: 250,
+                ..TokenBreakdown::default()
+            },
+        )
+        .expect("gpt-5.2-codex should be priced");
+
+        approx_eq(cost, 0.005_337_5);
+    }
+
+    #[test]
+    fn reprices_gpt_5_4_long_context_sessions() {
+        let breakdown = TokenBreakdown {
+            input_tokens: 1_000,
+            cached_input_tokens: 500,
+            output_tokens: 250,
+            ..TokenBreakdown::default()
+        };
+        let base = estimate_cost_usd("gpt-5.4", breakdown).expect("base price");
+        let long_context = estimate_cost_usd_with_long_context("gpt-5.4", breakdown, true)
+            .expect("long-context price");
+
+        approx_eq(base, 0.006_375);
+        approx_eq(long_context, 0.010_75);
+        assert!(triggers_long_context_pricing(
+            "gpt-5.4",
+            LONG_CONTEXT_INPUT_THRESHOLD + 1
+        ));
     }
 
     #[test]

@@ -11,6 +11,7 @@ import { showcaseCopy } from "./showcase-copy.mjs";
 import type {
   DailyUsagePoint,
   DashboardSnapshot,
+  PricingCoverage,
   SessionSummary,
   SourceDetailSnapshot,
   SourceStatus,
@@ -23,6 +24,9 @@ import {
   formatFriendlyNumber,
   formatLocalizedDateTime,
   getCopy,
+  longContextSessionLabel,
+  longContextSummaryLabel,
+  pricingCoverageLabel,
   sourceStateLabel,
   type Locale,
 } from "./i18n";
@@ -166,6 +170,37 @@ function formatTokenFigure(tokens: number, locale: Locale) {
   return formatFriendlyNumber(tokens, locale, 1);
 }
 
+function costToneClass(coverage: PricingCoverage) {
+  if (coverage === "pending") {
+    return " pending";
+  }
+
+  if (coverage === "partial") {
+    return " partial";
+  }
+
+  return "";
+}
+
+function formatCostStatus(
+  costUsd: number,
+  coverage: PricingCoverage,
+  locale: Locale,
+  renderCost: (cost: string) => string,
+  pendingLabel: string
+) {
+  if (coverage === "pending") {
+    return pendingLabel;
+  }
+
+  const costLabel = renderCost(formatUsd(costUsd, locale));
+  if (coverage === "partial") {
+    return `${costLabel} · ${pricingCoverageLabel(locale, coverage)}`;
+  }
+
+  return costLabel;
+}
+
 function useRetainedDateSelection(data: DailyUsagePoint[]) {
   const latestDay = data[data.length - 1];
   const availableDates = data.map((day) => day.date);
@@ -204,7 +239,6 @@ function TrendInspector({
   pricingPending: string;
 }) {
   const hasUsage = day.totalTokens > 0;
-  const hasCost = day.totalCostUsd > 0;
 
   return (
     <div className="trend-inspector">
@@ -212,12 +246,16 @@ function TrendInspector({
       <strong className="trend-inspector-value">
         {formatTokenFigure(day.totalTokens, locale)}
       </strong>
-      <span className={`trend-inspector-cost${hasUsage && !hasCost ? " pending" : ""}`}>
+      <span className={`trend-inspector-cost${costToneClass(day.pricingCoverage)}`}>
         {!hasUsage
           ? "—"
-          : hasCost
-            ? estimatedCost(formatUsd(day.totalCostUsd, locale))
-            : pricingPending}
+          : formatCostStatus(
+              day.totalCostUsd,
+              day.pricingCoverage,
+              locale,
+              estimatedCost,
+              pricingPending
+            )}
       </span>
     </div>
   );
@@ -237,7 +275,6 @@ function WeeklyDayFocus({
   pricingPending: string;
 }) {
   const hasUsage = day.totalTokens > 0;
-  const hasCost = day.totalCostUsd > 0;
 
   return (
     <div className="weekly-focus">
@@ -251,8 +288,14 @@ function WeeklyDayFocus({
             <span className="weekly-focus-sep" aria-hidden="true">
               ·
             </span>
-            <span className={`weekly-focus-cost${hasCost ? "" : " pending"}`}>
-              {hasCost ? estimatedCost(formatUsd(day.totalCostUsd, locale)) : pricingPending}
+            <span className={`weekly-focus-cost${costToneClass(day.pricingCoverage)}`}>
+              {formatCostStatus(
+                day.totalCostUsd,
+                day.pricingCoverage,
+                locale,
+                estimatedCost,
+                pricingPending
+              )}
             </span>
           </>
         )}
@@ -645,10 +688,14 @@ function SourceList({
           >
             <div className="source-main">
               <span className="source-name">{s.source}</span>
-              <span className={`source-cost${s.costUsd > 0 ? "" : " pending"}`}>
-                {s.costUsd > 0
-                  ? estimatedCost(formatUsd(s.costUsd, locale))
-                  : pricingPending}
+              <span className={`source-cost${costToneClass(s.pricingCoverage)}`}>
+                {formatCostStatus(
+                  s.costUsd,
+                  s.pricingCoverage,
+                  locale,
+                  estimatedCost,
+                  pricingPending
+                )}
               </span>
             </div>
             <div className="source-bar-bg">
@@ -722,12 +769,25 @@ function SessionFeed({
           <div className="sess-meta">
             <span>{s.model}</span>
             <span>{formatCompactNumber(s.totalTokens, locale, 1)} tokens</span>
-            <span className={`sess-cost${s.costUsd > 0 ? "" : " pending"}`}>
-              {s.costUsd > 0
-                ? estimatedCost(formatUsd(s.costUsd, locale))
-                : pricingPending}
+            <span className={`sess-cost${costToneClass(s.pricingCoverage)}`}>
+              {formatCostStatus(
+                s.costUsd,
+                s.pricingCoverage,
+                locale,
+                estimatedCost,
+                pricingPending
+              )}
             </span>
           </div>
+          {s.longContext && (
+            <div className="sess-long-context">
+              {longContextSessionLabel(
+                locale,
+                formatCompactNumber(s.longContext.peakInputTokens, locale, 1),
+                formatUsd(s.longContext.extraCostUsd, locale)
+              )}
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -776,7 +836,7 @@ function SourceDetailPage({
     snapshot.status.note ||
     (lastSeen
       ? `${copy.connectors.lastSeen} ${lastSeen}`
-      : `${sc.pricingCoverage}: ${calculationLabel(locale, snapshot.calculationMix)}`);
+      : `${sc.pricingCoverage}: ${pricingCoverageLabel(locale, snapshot.pricingCoverage)} · ${calculationLabel(locale, snapshot.calculationMix)}`);
 
   return (
     <section className="source-detail-page">
@@ -800,11 +860,20 @@ function SourceDetailPage({
             <div className="detail-chip">
               <span className="detail-chip-label">{sc.pricingCoverage}</span>
               <strong className="detail-chip-value">
-                {calculationLabel(locale, snapshot.calculationMix)}
+                {pricingCoverageLabel(locale, snapshot.pricingCoverage)}
               </strong>
             </div>
           </div>
         </div>
+        {snapshot.longContext.sessionCount > 0 && (
+          <div className="context-pill">
+            {longContextSummaryLabel(
+              locale,
+              snapshot.longContext.sessionCount,
+              formatUsd(snapshot.longContext.extraCostUsd, locale)
+            )}
+          </div>
+        )}
         {snapshot.status.capabilities.length > 0 && (
           <div className="source-cap-list">
             {snapshot.status.capabilities.map((capability) => (
@@ -1039,16 +1108,29 @@ export default function App() {
                 : "—"}
             </span>
             {snapshot.totalTokensToday > 0 && (
-              <p className={`burn-cost${snapshot.totalCostToday > 0 ? "" : " pending"}`}>
-                {snapshot.totalCostToday > 0
-                  ? sc.todayCost(formatUsd(snapshot.totalCostToday, locale))
-                  : sc.pricingPending}
+              <p className={`burn-cost${costToneClass(snapshot.pricingCoverage)}`}>
+                {formatCostStatus(
+                  snapshot.totalCostToday,
+                  snapshot.pricingCoverage,
+                  locale,
+                  sc.todayCost,
+                  sc.pricingPending
+                )}
               </p>
             )}
             {snapshot.burnRatePerHour > 0 && (
               <div className="burn-rate-pill">
                 <span className="burn-rate-fire">🔥</span>
                 {formatCompactNumber(snapshot.burnRatePerHour, locale, 1)} {sc.perHour}
+              </div>
+            )}
+            {snapshot.longContextToday.sessionCount > 0 && (
+              <div className="context-pill">
+                {longContextSummaryLabel(
+                  locale,
+                  snapshot.longContextToday.sessionCount,
+                  formatUsd(snapshot.longContextToday.extraCostUsd, locale)
+                )}
               </div>
             )}
           </section>

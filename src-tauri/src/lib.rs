@@ -12,9 +12,11 @@ use serde_json::Result as JsonResult;
 use connectors::{collect_all, collect_all_with_progress, SourceReport};
 pub use models::DashboardSnapshot;
 use models::{
-    CalculationMethod, DailyUsagePoint, SessionGroup, SessionSummary, SourceDetailSnapshot,
-    SourceStatus, SourceUsage,
+    CalculationMethod, DailyUsagePoint, LongContextSessionSummary, LongContextSummary,
+    PricingCoverage, SessionGroup, SessionSummary, SourceDetailSnapshot, SourceStatus,
+    SourceUsage,
 };
+use pricing::{estimate_cost_usd, estimate_cost_usd_with_long_context, triggers_long_context_pricing};
 
 #[tauri::command]
 fn get_dashboard_snapshot(time_zone: Option<String>) -> DashboardSnapshot {
@@ -33,6 +35,14 @@ fn get_source_snapshot(
 enum SnapshotTimeZone {
     Named(Tz),
     SystemLocal,
+}
+
+#[derive(Clone, Debug)]
+struct SessionPricingProfile {
+    cost_usd: f64,
+    pricing_coverage: PricingCoverage,
+    long_context_applies: bool,
+    long_context: Option<LongContextSessionSummary>,
 }
 
 impl SnapshotTimeZone {
@@ -135,17 +145,45 @@ fn build_dashboard_snapshot_from_reports(
         .iter()
         .flat_map(|report| report.usage_events.iter())
         .collect::<Vec<_>>();
+    let session_pricing = build_session_pricing_profiles(&reports);
     let today = snapshot_time_zone.today(now);
 
-    let total_tokens_today = usage_events
+    let today_usage_events = usage_events
         .iter()
         .filter(|event| snapshot_time_zone.local_day(event.occurred_at) == today)
+        .copied()
+        .collect::<Vec<_>>();
+    let total_tokens_today = today_usage_events
+        .iter()
         .map(|event| event.total_tokens)
         .sum::<u64>();
-    let total_cost_today = usage_events
+    let total_cost_today = today_usage_events
         .iter()
-        .filter(|event| snapshot_time_zone.local_day(event.occurred_at) == today)
-        .map(|event| event.estimated_cost_usd().unwrap_or(0.0))
+        .filter_map(|event| estimated_event_cost(event, &session_pricing))
+        .sum::<f64>();
+    let today_session_keys = today_usage_events
+        .iter()
+        .map(|event| session_cost_key(event.source_id, &event.session_id))
+        .collect::<HashSet<_>>();
+    let today_priced_session_keys = today_usage_events
+        .iter()
+        .filter_map(|event| {
+            estimated_event_cost(event, &session_pricing)
+                .map(|_| session_cost_key(event.source_id, &event.session_id))
+        })
+        .collect::<HashSet<_>>();
+    let long_context_session_keys = today_usage_events
+        .iter()
+        .filter_map(|event| {
+            session_pricing
+                .get(&session_cost_key(event.source_id, &event.session_id))
+                .and_then(|profile| profile.long_context.as_ref())
+                .map(|_| session_cost_key(event.source_id, &event.session_id))
+        })
+        .collect::<HashSet<_>>();
+    let long_context_extra_cost_today = today_usage_events
+        .iter()
+        .filter_map(|event| estimated_event_long_context_extra_cost(event, &session_pricing))
         .sum::<f64>();
 
     let total_native_today = usage_events
@@ -173,16 +211,31 @@ fn build_dashboard_snapshot_from_reports(
     let elapsed_hours = snapshot_time_zone.elapsed_hours(now);
     let burn_rate_per_hour = (total_tokens_today as f64 / elapsed_hours).round() as u64;
 
-    let week = build_weekly_usage(&usage_events, now, snapshot_time_zone);
-    let daily_history = build_daily_history(&usage_events, now, 180, snapshot_time_zone);
-    let sources = build_source_usage(&reports, &source_names, now, snapshot_time_zone);
-    let sessions = build_recent_sessions(&reports);
-    let session_groups = build_session_groups(&reports);
+    let week = build_weekly_usage(&usage_events, now, snapshot_time_zone, &session_pricing);
+    let daily_history =
+        build_daily_history(&usage_events, now, 180, snapshot_time_zone, &session_pricing);
+    let sources = build_source_usage(
+        &reports,
+        &source_names,
+        now,
+        snapshot_time_zone,
+        &session_pricing,
+    );
+    let sessions = build_recent_sessions(&reports, &session_pricing);
+    let session_groups = build_session_groups(&reports, &session_pricing);
 
     DashboardSnapshot {
         headline_date: snapshot_time_zone.headline_date(now),
         total_tokens_today,
         total_cost_today,
+        pricing_coverage: pricing_coverage(
+            today_session_keys.len(),
+            today_priced_session_keys.len(),
+        ),
+        long_context_today: LongContextSummary {
+            session_count: long_context_session_keys.len() as u32,
+            extra_cost_usd: long_context_extra_cost_today,
+        },
         exact_share,
         connected_sources,
         active_sources,
@@ -204,19 +257,46 @@ fn build_source_snapshot_from_reports(
 ) -> Option<SourceDetailSnapshot> {
     let report = reports.iter().find(|report| report.status.id == source_id)?;
     let usage_events = report.usage_events.iter().collect::<Vec<_>>();
-    let week = build_weekly_usage(&usage_events, now, snapshot_time_zone);
-    let daily_history = build_daily_history(&usage_events, now, 30, snapshot_time_zone);
+    let session_pricing = build_session_pricing_profiles(reports);
+    let week = build_weekly_usage(&usage_events, now, snapshot_time_zone, &session_pricing);
+    let daily_history =
+        build_daily_history(&usage_events, now, 30, snapshot_time_zone, &session_pricing);
     let today = week.last().cloned().unwrap_or(DailyUsagePoint {
         date: snapshot_time_zone.today(now).format("%Y-%m-%d").to_string(),
         total_tokens: 0,
         total_cost_usd: 0.0,
+        pricing_coverage: PricingCoverage::Complete,
         exact_share: 0.0,
         active_sources: 0,
         session_count: 0,
     });
-    let session_costs = build_session_costs(reports);
+    let session_costs = build_session_costs(reports, &session_pricing);
     let mut sessions = report.sessions.iter().collect::<Vec<_>>();
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let source_session_keys = usage_events
+        .iter()
+        .map(|event| session_cost_key(event.source_id, &event.session_id))
+        .collect::<HashSet<_>>();
+    let priced_source_session_keys = usage_events
+        .iter()
+        .filter_map(|event| {
+            estimated_event_cost(event, &session_pricing)
+                .map(|_| session_cost_key(event.source_id, &event.session_id))
+        })
+        .collect::<HashSet<_>>();
+    let long_context_session_keys = usage_events
+        .iter()
+        .filter_map(|event| {
+            session_pricing
+                .get(&session_cost_key(event.source_id, &event.session_id))
+                .and_then(|profile| profile.long_context.as_ref())
+                .map(|_| session_cost_key(event.source_id, &event.session_id))
+        })
+        .collect::<HashSet<_>>();
+    let long_context_extra_cost_usd = usage_events
+        .iter()
+        .filter_map(|event| estimated_event_long_context_extra_cost(event, &session_pricing))
+        .sum::<f64>();
 
     Some(SourceDetailSnapshot {
         source_id: report.status.id.clone(),
@@ -225,6 +305,15 @@ fn build_source_snapshot_from_reports(
         calculation_mix: report_calculation_mix(report),
         today_tokens: today.total_tokens,
         today_cost_usd: today.total_cost_usd,
+        pricing_coverage: if source_session_keys.is_empty() && !report.sessions.is_empty() {
+            PricingCoverage::Pending
+        } else {
+            pricing_coverage(source_session_keys.len(), priced_source_session_keys.len())
+        },
+        long_context: LongContextSummary {
+            session_count: long_context_session_keys.len() as u32,
+            extra_cost_usd: long_context_extra_cost_usd,
+        },
         week,
         daily_history,
         sessions: sessions
@@ -262,12 +351,115 @@ pub fn set_scan_detail_hook(
     connectors::set_scan_detail_hook(hook);
 }
 
+fn pricing_coverage(total_sessions: usize, priced_sessions: usize) -> PricingCoverage {
+    if total_sessions == 0 || total_sessions == priced_sessions {
+        PricingCoverage::Complete
+    } else if priced_sessions == 0 {
+        PricingCoverage::Pending
+    } else {
+        PricingCoverage::Partial
+    }
+}
+
+fn build_session_pricing_profiles(reports: &[SourceReport]) -> HashMap<String, SessionPricingProfile> {
+    let mut events_by_session = HashMap::<String, Vec<&connectors::UsageEvent>>::new();
+    for report in reports {
+        for event in &report.usage_events {
+            events_by_session
+                .entry(session_cost_key(event.source_id, &event.session_id))
+                .or_default()
+                .push(event);
+        }
+    }
+
+    events_by_session
+        .into_iter()
+        .map(|(session_key, events)| {
+            let long_context_applies = events.iter().any(|event| {
+                triggers_long_context_pricing(&event.model, event.token_breakdown.raw_input_tokens())
+            });
+            let peak_input_tokens = events
+                .iter()
+                .map(|event| event.token_breakdown.raw_input_tokens())
+                .max()
+                .unwrap_or(0);
+            let mut cost_usd = 0.0;
+            let mut base_cost_usd = 0.0;
+            let mut priced_events = 0;
+
+            for event in &events {
+                if let Some(base_cost) = estimate_cost_usd(&event.model, event.token_breakdown) {
+                    base_cost_usd += base_cost;
+                }
+                if let Some(event_cost) = estimate_cost_usd_with_long_context(
+                    &event.model,
+                    event.token_breakdown,
+                    long_context_applies,
+                ) {
+                    cost_usd += event_cost;
+                    priced_events += 1;
+                }
+            }
+
+            let long_context = if long_context_applies {
+                Some(LongContextSessionSummary {
+                    peak_input_tokens,
+                    extra_cost_usd: (cost_usd - base_cost_usd).max(0.0),
+                })
+            } else {
+                None
+            };
+
+            (
+                session_key,
+                SessionPricingProfile {
+                    cost_usd,
+                    pricing_coverage: pricing_coverage(events.len(), priced_events),
+                    long_context_applies,
+                    long_context,
+                },
+            )
+        })
+        .collect()
+}
+
+fn estimated_event_cost(
+    event: &connectors::UsageEvent,
+    session_pricing: &HashMap<String, SessionPricingProfile>,
+) -> Option<f64> {
+    let long_context_applies = session_pricing
+        .get(&session_cost_key(event.source_id, &event.session_id))
+        .map(|profile| profile.long_context_applies)
+        .unwrap_or(false);
+
+    estimate_cost_usd_with_long_context(&event.model, event.token_breakdown, long_context_applies)
+}
+
+fn estimated_event_long_context_extra_cost(
+    event: &connectors::UsageEvent,
+    session_pricing: &HashMap<String, SessionPricingProfile>,
+) -> Option<f64> {
+    let long_context_applies = session_pricing
+        .get(&session_cost_key(event.source_id, &event.session_id))
+        .map(|profile| profile.long_context_applies)
+        .unwrap_or(false);
+    if !long_context_applies {
+        return None;
+    }
+
+    let base_cost = estimate_cost_usd(&event.model, event.token_breakdown)?;
+    let repriced_cost =
+        estimate_cost_usd_with_long_context(&event.model, event.token_breakdown, true)?;
+    Some((repriced_cost - base_cost).max(0.0))
+}
+
 fn build_weekly_usage(
     usage_events: &[&connectors::UsageEvent],
     now: DateTime<Utc>,
     snapshot_time_zone: SnapshotTimeZone,
+    session_pricing: &HashMap<String, SessionPricingProfile>,
 ) -> Vec<DailyUsagePoint> {
-    build_usage_window(usage_events, now, 7, snapshot_time_zone)
+    build_usage_window(usage_events, now, 7, snapshot_time_zone, session_pricing)
 }
 
 fn build_daily_history(
@@ -275,8 +467,9 @@ fn build_daily_history(
     now: DateTime<Utc>,
     day_count: usize,
     snapshot_time_zone: SnapshotTimeZone,
+    session_pricing: &HashMap<String, SessionPricingProfile>,
 ) -> Vec<DailyUsagePoint> {
-    build_usage_window(usage_events, now, day_count, snapshot_time_zone)
+    build_usage_window(usage_events, now, day_count, snapshot_time_zone, session_pricing)
 }
 
 fn build_usage_window(
@@ -284,27 +477,39 @@ fn build_usage_window(
     now: DateTime<Utc>,
     day_count: usize,
     snapshot_time_zone: SnapshotTimeZone,
+    session_pricing: &HashMap<String, SessionPricingProfile>,
 ) -> Vec<DailyUsagePoint> {
-    let mut totals = HashMap::<String, (u64, u64, f64)>::new();
+    let mut totals =
+        HashMap::<String, (u64, u64, f64, HashSet<String>, HashSet<String>)>::new();
     for event in usage_events {
         let key = snapshot_time_zone
             .local_day(event.occurred_at)
             .format("%Y-%m-%d")
             .to_string();
-        let entry = totals.entry(key).or_insert((0, 0, 0.0));
+        let entry = totals
+            .entry(key)
+            .or_insert((0, 0, 0.0, HashSet::new(), HashSet::new()));
         entry.0 += event.total_tokens;
         if event.calculation_method == CalculationMethod::Native {
             entry.1 += event.total_tokens;
         }
-        entry.2 += event.estimated_cost_usd().unwrap_or(0.0);
+        let session_key = session_cost_key(event.source_id, &event.session_id);
+        entry.3.insert(session_key.clone());
+        if let Some(cost_usd) = estimated_event_cost(event, session_pricing) {
+            entry.2 += cost_usd;
+            entry.4.insert(session_key);
+        }
     }
 
     (0..day_count)
         .map(|offset| snapshot_time_zone.today(now) - Duration::days((day_count - 1 - offset) as i64))
         .map(|day| {
             let key = day.format("%Y-%m-%d").to_string();
-            let (total_tokens, exact_tokens, total_cost_usd) =
-                totals.get(&key).copied().unwrap_or((0, 0, 0.0));
+            let (total_tokens, exact_tokens, total_cost_usd, session_keys, priced_session_keys) =
+                totals
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or((0, 0, 0.0, HashSet::new(), HashSet::new()));
             let exact_share = if total_tokens == 0 {
                 0.0
             } else {
@@ -315,6 +520,7 @@ fn build_usage_window(
                 date: key,
                 total_tokens,
                 total_cost_usd,
+                pricing_coverage: pricing_coverage(session_keys.len(), priced_session_keys.len()),
                 exact_share,
                 active_sources: count_active_sources_for_day(usage_events, day, snapshot_time_zone),
                 session_count: count_sessions_for_day(usage_events, day, snapshot_time_zone),
@@ -328,6 +534,7 @@ fn build_source_usage(
     source_names: &HashMap<String, String>,
     now: DateTime<Utc>,
     snapshot_time_zone: SnapshotTimeZone,
+    session_pricing: &HashMap<String, SessionPricingProfile>,
 ) -> Vec<SourceUsage> {
     let today = snapshot_time_zone.today(now);
     let yesterday = today - Duration::days(1);
@@ -342,11 +549,14 @@ fn build_source_usage(
                 .or_insert((0, 0, 0.0, HashSet::new(), HashSet::new()));
             if local_day == today {
                 entry.0 += event.total_tokens;
-                entry.2 += event.estimated_cost_usd().unwrap_or(0.0);
-                entry.3.insert(event.session_id.clone());
+                let session_key = session_cost_key(event.source_id, &event.session_id);
+                entry.3.insert(session_key.clone());
+                if let Some(cost_usd) = estimated_event_cost(event, session_pricing) {
+                    entry.2 += cost_usd;
+                    entry.4.insert(session_key);
+                }
             } else if local_day == yesterday {
                 entry.1 += event.total_tokens;
-                entry.4.insert(event.session_id.clone());
             }
         }
     }
@@ -355,7 +565,7 @@ fn build_source_usage(
         .iter()
         .filter(|report| !matches!(report.status.state, models::SourceState::Missing))
         .map(|report| {
-            let (today_tokens, yesterday_tokens, today_cost_usd, today_sessions, _) = usage_by_source
+            let (today_tokens, yesterday_tokens, today_cost_usd, today_sessions, today_priced_sessions) = usage_by_source
                 .remove(&report.status.id)
                 .unwrap_or((0, 0, 0.0, HashSet::new(), HashSet::new()));
             let trend = if today_tokens > yesterday_tokens + (yesterday_tokens / 20).max(1) {
@@ -376,6 +586,10 @@ fn build_source_usage(
                     .unwrap_or_else(|| report.status.name.clone()),
                 tokens: today_tokens,
                 cost_usd: today_cost_usd,
+                pricing_coverage: pricing_coverage(
+                    today_sessions.len(),
+                    today_priced_sessions.len(),
+                ),
                 sessions: today_sessions.len() as u32,
                 trend: trend.into(),
                 calculation_mix,
@@ -384,8 +598,11 @@ fn build_source_usage(
         .collect()
 }
 
-fn build_recent_sessions(reports: &[SourceReport]) -> Vec<SessionSummary> {
-    let session_costs = build_session_costs(reports);
+fn build_recent_sessions(
+    reports: &[SourceReport],
+    session_pricing: &HashMap<String, SessionPricingProfile>,
+) -> Vec<SessionSummary> {
+    let session_costs = build_session_costs(reports, session_pricing);
     let mut sessions = reports
         .iter()
         .flat_map(|report| report.sessions.iter())
@@ -398,8 +615,11 @@ fn build_recent_sessions(reports: &[SourceReport]) -> Vec<SessionSummary> {
         .collect()
 }
 
-fn build_session_groups(reports: &[SourceReport]) -> Vec<SessionGroup> {
-    let session_costs = build_session_costs(reports);
+fn build_session_groups(
+    reports: &[SourceReport],
+    session_pricing: &HashMap<String, SessionPricingProfile>,
+) -> Vec<SessionGroup> {
+    let session_costs = build_session_costs(reports, session_pricing);
     let mut groups = reports
         .iter()
         .filter(|report| !matches!(report.status.state, models::SourceState::Missing))
@@ -444,21 +664,29 @@ fn count_sessions_for_day(
     usage_events
         .iter()
         .filter(|event| snapshot_time_zone.local_day(event.occurred_at) == day)
-        .map(|event| event.session_id.clone())
+        .map(|event| session_cost_key(event.source_id, &event.session_id))
         .collect::<HashSet<_>>()
         .len() as u32
 }
 
-fn build_session_costs(reports: &[SourceReport]) -> HashMap<String, f64> {
-    let mut costs = HashMap::<String, f64>::new();
+fn build_session_costs(
+    reports: &[SourceReport],
+    session_pricing: &HashMap<String, SessionPricingProfile>,
+) -> HashMap<String, SessionPricingProfile> {
+    let mut costs = HashMap::<String, SessionPricingProfile>::new();
     for report in reports {
-        for event in &report.usage_events {
-            let Some(cost_usd) = event.estimated_cost_usd() else {
-                continue;
-            };
-            *costs
-                .entry(session_cost_key(event.source_id, &event.session_id))
-                .or_insert(0.0) += cost_usd;
+        for session in &report.sessions {
+            let key = session_cost_key(&session.summary.source_id, &session.summary.id);
+            if let Some(profile) = session_pricing.get(&key) {
+                costs.insert(key, profile.clone());
+            } else {
+                costs.entry(key).or_insert(SessionPricingProfile {
+                    cost_usd: 0.0,
+                    pricing_coverage: PricingCoverage::Pending,
+                    long_context_applies: false,
+                    long_context: None,
+                });
+            }
         }
     }
     costs
@@ -466,11 +694,13 @@ fn build_session_costs(reports: &[SourceReport]) -> HashMap<String, f64> {
 
 fn attach_session_cost(
     summary: &SessionSummary,
-    session_costs: &HashMap<String, f64>,
+    session_costs: &HashMap<String, SessionPricingProfile>,
 ) -> SessionSummary {
     let mut summary = summary.clone();
-    if let Some(cost_usd) = session_costs.get(&session_cost_key(&summary.source_id, &summary.id)) {
-        summary.cost_usd = *cost_usd;
+    if let Some(profile) = session_costs.get(&session_cost_key(&summary.source_id, &summary.id)) {
+        summary.cost_usd = profile.cost_usd;
+        summary.pricing_coverage = profile.pricing_coverage;
+        summary.long_context = profile.long_context.clone();
     }
     summary
 }
@@ -564,6 +794,8 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 1_750,
                     cost_usd: 0.0,
+                    pricing_coverage: PricingCoverage::Pending,
+                    long_context: None,
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },
@@ -577,9 +809,13 @@ mod tests {
         );
 
         approx_eq(snapshot.total_cost_today, expected_cost);
+        assert_eq!(snapshot.pricing_coverage, PricingCoverage::Complete);
         approx_eq(snapshot.sources[0].cost_usd, expected_cost);
+        assert_eq!(snapshot.sources[0].pricing_coverage, PricingCoverage::Complete);
         approx_eq(snapshot.sessions[0].cost_usd, expected_cost);
+        assert_eq!(snapshot.sessions[0].pricing_coverage, PricingCoverage::Complete);
         approx_eq(snapshot.week[6].total_cost_usd, expected_cost);
+        assert_eq!(snapshot.week[6].pricing_coverage, PricingCoverage::Complete);
         approx_eq(snapshot.daily_history.last().expect("daily point").total_cost_usd, expected_cost);
     }
 
@@ -617,6 +853,8 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 8_000,
                     cost_usd: 0.0,
+                    pricing_coverage: PricingCoverage::Pending,
+                    long_context: None,
                     calculation_method: CalculationMethod::Estimated,
                     status: "indexed".into(),
                 },
@@ -631,8 +869,11 @@ mod tests {
 
         assert_eq!(snapshot.total_tokens_today, 8_000);
         approx_eq(snapshot.total_cost_today, 0.0);
+        assert_eq!(snapshot.pricing_coverage, PricingCoverage::Pending);
         approx_eq(snapshot.sources[0].cost_usd, 0.0);
+        assert_eq!(snapshot.sources[0].pricing_coverage, PricingCoverage::Pending);
         approx_eq(snapshot.sessions[0].cost_usd, 0.0);
+        assert_eq!(snapshot.sessions[0].pricing_coverage, PricingCoverage::Pending);
     }
 
     #[test]
@@ -672,6 +913,8 @@ mod tests {
                     started_at: "Mar 24 12:00".into(),
                     total_tokens: 1_750,
                     cost_usd: 0.0,
+                    pricing_coverage: PricingCoverage::Pending,
+                    long_context: None,
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },
@@ -688,6 +931,7 @@ mod tests {
 
         assert_eq!(snapshot.source_id, "codex");
         approx_eq(snapshot.today_cost_usd, expected_cost);
+        assert_eq!(snapshot.pricing_coverage, PricingCoverage::Complete);
         approx_eq(snapshot.week[6].total_cost_usd, expected_cost);
         approx_eq(snapshot.sessions[0].cost_usd, expected_cost);
     }
@@ -730,6 +974,8 @@ mod tests {
                     started_at: "Mar 25 00:10".into(),
                     total_tokens: 1_500,
                     cost_usd: 0.0,
+                    pricing_coverage: PricingCoverage::Pending,
+                    long_context: None,
                     calculation_method: CalculationMethod::Native,
                     status: "indexed".into(),
                 },
@@ -745,6 +991,92 @@ mod tests {
         assert_eq!(snapshot.total_tokens_today, 1_500);
         assert_eq!(snapshot.week.last().expect("daily point").date, "2026-03-25");
         assert_eq!(snapshot.week.last().expect("daily point").total_tokens, 1_500);
+    }
+
+    #[test]
+    fn gpt_5_4_long_context_sessions_are_repriced_and_flagged() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 24, 16, 0, 0)
+            .single()
+            .expect("utc datetime");
+        let occurred_at = now;
+        let report = SourceReport {
+            status: ready_status("codex", "Codex"),
+            usage_events: vec![
+                UsageEvent {
+                    source_id: "codex",
+                    occurred_at,
+                    model: "gpt-5.4".into(),
+                    token_breakdown: TokenBreakdown {
+                        input_tokens: 1_000,
+                        cached_input_tokens: 299_000,
+                        output_tokens: 1_000,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens: 301_000,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: "session-1".into(),
+                },
+                UsageEvent {
+                    source_id: "codex",
+                    occurred_at,
+                    model: "gpt-5.4".into(),
+                    token_breakdown: TokenBreakdown {
+                        input_tokens: 1_000,
+                        output_tokens: 500,
+                        ..TokenBreakdown::default()
+                    },
+                    total_tokens: 1_500,
+                    calculation_method: CalculationMethod::Native,
+                    session_id: "session-1".into(),
+                },
+            ],
+            sessions: vec![SessionRecord {
+                updated_at: occurred_at,
+                summary: SessionSummary {
+                    id: "session-1".into(),
+                    source_id: "codex".into(),
+                    title: "Long Context".into(),
+                    preview: "Preview".into(),
+                    source: "Codex".into(),
+                    workspace: "burned".into(),
+                    model: "gpt-5.4".into(),
+                    started_at: "Mar 24 12:00".into(),
+                    total_tokens: 302_500,
+                    cost_usd: 0.0,
+                    pricing_coverage: PricingCoverage::Pending,
+                    long_context: None,
+                    calculation_method: CalculationMethod::Native,
+                    status: "indexed".into(),
+                },
+            }],
+        };
+
+        let snapshot = build_dashboard_snapshot_from_reports(
+            vec![report],
+            now,
+            SnapshotTimeZone::Named("UTC".parse::<Tz>().expect("time zone")),
+        );
+
+        approx_eq(snapshot.total_cost_today, 0.118_5);
+        assert_eq!(snapshot.long_context_today.session_count, 1);
+        approx_eq(snapshot.long_context_today.extra_cost_usd, 0.016_25);
+        assert_eq!(
+            snapshot.sessions[0]
+                .long_context
+                .as_ref()
+                .expect("long-context summary")
+                .peak_input_tokens,
+            300_000
+        );
+        approx_eq(
+            snapshot.sessions[0]
+                .long_context
+                .as_ref()
+                .expect("long-context summary")
+                .extra_cost_usd,
+            0.016_25,
+        );
     }
 
     fn ready_status(id: &str, name: &str) -> SourceStatus {

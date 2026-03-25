@@ -11,6 +11,11 @@ export function createEmptyDashboardSnapshot(now = new Date()): DashboardSnapsho
     headlineDate: isoDate,
     totalTokensToday: 0,
     totalCostToday: 0,
+    pricingCoverage: "complete",
+    longContextToday: {
+      sessionCount: 0,
+      extraCostUsd: 0
+    },
     exactShare: 0,
     connectedSources: 0,
     activeSources: 0,

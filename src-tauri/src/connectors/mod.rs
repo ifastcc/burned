@@ -23,6 +23,7 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    #[allow(dead_code)]
     pub fn estimated_cost_usd(&self) -> Option<f64> {
         estimate_cost_usd(&self.model, self.token_breakdown)
     }

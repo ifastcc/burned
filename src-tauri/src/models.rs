@@ -17,12 +17,35 @@ pub enum SourceState {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PricingCoverage {
+    Complete,
+    Partial,
+    Pending,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LongContextSummary {
+    pub session_count: u32,
+    pub extra_cost_usd: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LongContextSessionSummary {
+    pub peak_input_tokens: u64,
+    pub extra_cost_usd: f64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyUsagePoint {
     pub date: String,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
+    pub pricing_coverage: PricingCoverage,
     pub exact_share: f64,
     pub active_sources: u16,
     pub session_count: u32,
@@ -35,6 +58,7 @@ pub struct SourceUsage {
     pub source: String,
     pub tokens: u64,
     pub cost_usd: f64,
+    pub pricing_coverage: PricingCoverage,
     pub sessions: u32,
     pub trend: String,
     pub calculation_mix: String,
@@ -53,6 +77,8 @@ pub struct SessionSummary {
     pub started_at: String,
     pub total_tokens: u64,
     pub cost_usd: f64,
+    pub pricing_coverage: PricingCoverage,
+    pub long_context: Option<LongContextSessionSummary>,
     pub calculation_method: CalculationMethod,
     pub status: String,
 }
@@ -85,6 +111,8 @@ pub struct DashboardSnapshot {
     pub headline_date: String,
     pub total_tokens_today: u64,
     pub total_cost_today: f64,
+    pub pricing_coverage: PricingCoverage,
+    pub long_context_today: LongContextSummary,
     pub exact_share: f64,
     pub connected_sources: u16,
     pub active_sources: u16,
@@ -106,6 +134,8 @@ pub struct SourceDetailSnapshot {
     pub calculation_mix: String,
     pub today_tokens: u64,
     pub today_cost_usd: f64,
+    pub pricing_coverage: PricingCoverage,
+    pub long_context: LongContextSummary,
     pub week: Vec<DailyUsagePoint>,
     pub daily_history: Vec<DailyUsagePoint>,
     pub sessions: Vec<SessionSummary>,

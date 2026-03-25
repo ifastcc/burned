@@ -13,7 +13,7 @@ use walkdir::WalkDir;
 use crate::connectors::{
     report_scan_detail, SessionRecord, SourceConnector, SourceReport, UsageEvent,
 };
-use crate::models::{CalculationMethod, SessionSummary, SourceState, SourceStatus};
+use crate::models::{CalculationMethod, PricingCoverage, SessionSummary, SourceState, SourceStatus};
 use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "claude_code";
@@ -351,6 +351,8 @@ fn to_session_record(session: SessionAccumulator) -> Option<SessionRecord> {
                 .to_string(),
             total_tokens: session.total_tokens,
             cost_usd: 0.0,
+            pricing_coverage: PricingCoverage::Pending,
+            long_context: None,
             calculation_method: CalculationMethod::Native,
             status: "indexed".into(),
         },

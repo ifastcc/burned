@@ -68,7 +68,11 @@ export function UsageBars({ week, sources }: UsageBarsProps) {
               <div className="source-stats">
                 <span>{(source.tokens / 1000).toFixed(0)}k tokens</span>
                 <span>
-                  {source.costUsd > 0 ? `$${source.costUsd.toFixed(2)}` : "pricing pending"}
+                  {source.pricingCoverage === "pending"
+                    ? "pricing pending"
+                    : source.pricingCoverage === "partial"
+                      ? `$${source.costUsd.toFixed(2)} · partial pricing`
+                      : `$${source.costUsd.toFixed(2)}`}
                 </span>
               </div>
             </div>

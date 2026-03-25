@@ -606,6 +606,7 @@ fn collect_agent_sessions(db_path: &Path) -> Result<(Vec<SessionRecord>, Vec<Usa
                         total_tokens,
                         calculation_method: CalculationMethod::Native,
                         session_id: format!("agent:{session_id}"),
+                        explicit_cost_usd: None,
                     });
                 }
             }
@@ -1109,6 +1110,7 @@ fn backup_topic_to_session(
                     total_tokens,
                     calculation_method: CalculationMethod::Native,
                     session_id: topic_id.clone(),
+                    explicit_cost_usd: None,
                 });
             }
         }
@@ -1416,6 +1418,7 @@ mod tests {
                 total_tokens: 10,
                 calculation_method: CalculationMethod::Native,
                 session_id: "topic-a".into(),
+                explicit_cost_usd: None,
             },
             UsageEvent {
                 source_id: SOURCE_ID,
@@ -1428,6 +1431,7 @@ mod tests {
                 total_tokens: 20,
                 calculation_method: CalculationMethod::Native,
                 session_id: "topic-b".into(),
+                explicit_cost_usd: None,
             },
         ];
 
@@ -1491,6 +1495,7 @@ mod tests {
                 total_tokens: 123,
                 calculation_method: CalculationMethod::Native,
                 session_id: "backup-topic".into(),
+                explicit_cost_usd: None,
             }],
             topic_count: 1,
             ..Default::default()

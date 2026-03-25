@@ -110,7 +110,7 @@ fn scan_initial_snapshot() -> Result<String> {
             state.detail = None;
             print_progress_line(completed, total, label, None);
         }
-    }, None)
+    })
     .context("serialize dashboard snapshot");
     burned_lib::set_scan_detail_hook(None);
     let body = body?;
@@ -164,23 +164,16 @@ fn handle_request(
     initial_snapshot: &Arc<Mutex<Option<String>>>,
 ) -> Result<()> {
     let request_path = request.url().split('?').next().unwrap_or("/");
-    let request_time_zone = request_time_zone(&request);
 
     if request_path == "/api/snapshot" {
-        let body = if let Some(time_zone) = request_time_zone.as_deref() {
-            burned_lib::build_dashboard_snapshot_json(Some(time_zone))
-                .context("serialize dashboard snapshot")?
-        } else {
-            initial_snapshot
-                .lock()
-                .expect("Burned initial snapshot mutex poisoned")
-                .take()
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    burned_lib::build_dashboard_snapshot_json(None)
-                        .context("serialize dashboard snapshot")
-                })?
-        };
+        let body = initial_snapshot
+            .lock()
+            .expect("Burned initial snapshot mutex poisoned")
+            .take()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                burned_lib::build_dashboard_snapshot_json().context("serialize dashboard snapshot")
+            })?;
         let response = Response::from_string(body)
             .with_status_code(StatusCode(200))
             .with_header(content_type_header("application/json; charset=utf-8"));
@@ -189,7 +182,7 @@ fn handle_request(
     }
 
     if let Some(source_id) = request_path.strip_prefix("/api/sources/") {
-        match burned_lib::build_source_snapshot_json(source_id, request_time_zone.as_deref()) {
+        match burned_lib::build_source_snapshot_json(source_id) {
             Ok(body) => {
                 let response = Response::from_string(body)
                     .with_status_code(StatusCode(200))
@@ -306,15 +299,6 @@ fn handle_request(
         .context("respond with index.html")?;
 
     Ok(())
-}
-
-fn request_time_zone(request: &tiny_http::Request) -> Option<String> {
-    request
-        .headers()
-        .iter()
-        .find(|header| header.field.equiv("X-Burned-Time-Zone"))
-        .map(|header| header.value.as_str().trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn resolve_asset_path(dist_dir: &Path, request_path: &str) -> Option<PathBuf> {

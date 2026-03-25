@@ -844,6 +844,7 @@ mod tests {
                 total_tokens: 1_750,
                 calculation_method: CalculationMethod::Native,
                 session_id: "session-1".into(),
+                explicit_cost_usd: None,
             }],
             sessions: vec![SessionRecord {
                 updated_at: occurred_at,
@@ -894,6 +895,7 @@ mod tests {
                 total_tokens: 8_000,
                 calculation_method: CalculationMethod::Estimated,
                 session_id: "cursor-1".into(),
+                explicit_cost_usd: None,
             }],
             sessions: vec![SessionRecord {
                 updated_at: occurred_at,
@@ -946,6 +948,7 @@ mod tests {
                 total_tokens: 1_750,
                 calculation_method: CalculationMethod::Native,
                 session_id: "session-1".into(),
+                explicit_cost_usd: None,
             }],
             sessions: vec![SessionRecord {
                 updated_at: occurred_at,
@@ -1123,6 +1126,7 @@ mod tests {
                     total_tokens: 1_750,
                     calculation_method: CalculationMethod::Native,
                     session_id: "actual".into(),
+                    explicit_cost_usd: None,
                 },
                 UsageEvent {
                     source_id: "codex",
@@ -1137,6 +1141,7 @@ mod tests {
                     total_tokens: 1_020,
                     calculation_method: CalculationMethod::Native,
                     session_id: "partial".into(),
+                    explicit_cost_usd: None,
                 },
                 UsageEvent {
                     source_id: "codex",
@@ -1149,6 +1154,7 @@ mod tests {
                     total_tokens: 700,
                     calculation_method: CalculationMethod::Native,
                     session_id: "partial".into(),
+                    explicit_cost_usd: None,
                 },
                 UsageEvent {
                     source_id: "codex",
@@ -1161,6 +1167,7 @@ mod tests {
                     total_tokens: 500,
                     calculation_method: CalculationMethod::Native,
                     session_id: "pending".into(),
+                    explicit_cost_usd: None,
                 },
             ],
             sessions: vec![
@@ -1232,6 +1239,7 @@ mod tests {
                 total_tokens: 1_750,
                 calculation_method: CalculationMethod::Native,
                 session_id: format!("{id}-session"),
+                explicit_cost_usd: None,
             }],
             sessions: vec![session_record(
                 id,

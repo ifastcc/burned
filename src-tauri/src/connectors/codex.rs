@@ -335,6 +335,7 @@ fn parse_usage_event(ts: i64, body: &str) -> Option<UsageEvent> {
         total_tokens,
         calculation_method: CalculationMethod::Native,
         session_id,
+        explicit_cost_usd: None,
     })
 }
 
@@ -449,6 +450,7 @@ fn parse_session_usage_events(contents: &str, fallback_session_id: &str) -> Vec<
             } else {
                 session_id.clone()
             },
+            explicit_cost_usd: None,
         });
     }
 

@@ -306,6 +306,7 @@ fn parse_session_file(path: &Path) -> Result<ParsedSessionFile> {
                     total_tokens,
                     calculation_method: CalculationMethod::Native,
                     session_id: session_id.clone(),
+                    explicit_cost_usd: None,
                 });
                 accumulator.total_tokens += total_tokens;
             }

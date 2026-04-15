@@ -504,14 +504,20 @@ fn truncate(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use anyhow::Result;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn write_temp_session(contents: impl AsRef<[u8]>) -> Result<PathBuf> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("burned-claude-{unique}.jsonl"));
+        let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "burned-claude-{}-{unique}-{suffix}.jsonl",
+            std::process::id()
+        ));
         fs::write(&path, contents)?;
         Ok(path)
     }

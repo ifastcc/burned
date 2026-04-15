@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod codex;
+pub mod github_copilot;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -76,6 +77,7 @@ fn default_connectors() -> Vec<(&'static str, Box<dyn SourceConnector>)> {
     vec![
         ("Codex", Box::new(codex::CodexConnector)),
         ("Claude Code", Box::new(claude_code::ClaudeCodeConnector)),
+        ("GitHub Copilot", Box::new(github_copilot::GitHubCopilotConnector)),
     ]
 }
 
@@ -158,5 +160,15 @@ mod tests {
                 (1, 2, "Claude Code".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn default_connectors_include_github_copilot() {
+        let labels = default_connectors()
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect::<Vec<_>>();
+
+        assert!(labels.contains(&"GitHub Copilot"));
     }
 }

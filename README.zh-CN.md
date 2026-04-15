@@ -2,13 +2,13 @@
 
 [English](./README.md)
 
-Burned 是一个给 Codex 和 Claude Code 用的本地用量面板。
+Burned 是一个给 Codex、Claude Code 和 GitHub Copilot 用的本地用量面板。
 
 它会读取本地 session 数据，整理成统一的统计视图，让你不用翻各个工具自己的存储格式，也能看清 token 和成本变化。
 
 ## 它能做什么
 
-- 读取 `Codex` 和 `Claude Code` 的本地 session。
+- 读取 `Codex`、`Claude Code` 和 `GitHub Copilot` 的本地 session。
 - 在一个界面里查看每天的 token、成本、最近 session 和来源趋势。
 - 保留来源原生的标题和预览，方便你快速定位是哪次对话把消耗拉高了。
 - 用 `native`、`derived`、`estimated` 标明统计来源，数字来路更清楚。
@@ -18,6 +18,7 @@ Burned 是一个给 Codex 和 Claude Code 用的本地用量面板。
 
 - `Codex`
 - `Claude Code`
+- `GitHub Copilot`（读取 VS Code `chatSessions` 的 session 元数据；如果存在 `~/.copilot/session-state` agent 会话，还会接入原生 token 汇总）
 
 ## 快速开始
 

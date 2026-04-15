@@ -2,13 +2,13 @@
 
 [简体中文](./README.zh-CN.md)
 
-Burned is a local usage dashboard for Codex and Claude Code.
+Burned is a local usage dashboard for Codex, Claude Code, and GitHub Copilot.
 
 It reads local session data, turns it into a consistent usage layer, and lets you see token and cost trends without digging through tool-specific storage.
 
 ## What It Does
 
-- Read local sessions from `Codex` and `Claude Code`.
+- Read local sessions from `Codex`, `Claude Code`, and `GitHub Copilot`.
 - Show daily tokens, cost, recent sessions, and source-level trends in one dashboard.
 - Keep source-native titles and previews so you can quickly find what actually caused a spike.
 - Mark usage as `native`, `derived`, or `estimated` so the numbers have clear provenance.
@@ -18,6 +18,7 @@ It reads local session data, turns it into a consistent usage layer, and lets yo
 
 - `Codex`
 - `Claude Code`
+- `GitHub Copilot` (session metadata from VS Code `chatSessions`; native totals from `~/.copilot/session-state` when agent sessions exist)
 
 ## Quick Start
 

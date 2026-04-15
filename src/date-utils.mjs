@@ -1,3 +1,5 @@
+import { showcaseCopy } from "./showcase-copy.mjs";
+
 const formatterCache = new Map();
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
@@ -163,6 +165,24 @@ export function buildWeeklyBurnCopy({ date, todayDate, locale }) {
   return {
     title: `Burn on ${formatMonthDay(date, locale)}${sameYear ? "" : `, ${date.slice(0, 4)}`}`,
     metaDate
+  };
+}
+
+export function buildHomeHeroCopy({ totalTokensToday, locale }) {
+  const copy = showcaseCopy[locale];
+
+  if (totalTokensToday > 0) {
+    return {
+      state: "active",
+      title: copy.tagline,
+      subtitle: null,
+    };
+  }
+
+  return {
+    state: "idle",
+    title: copy.idleTitle,
+    subtitle: copy.idleSubtitle,
   };
 }
 

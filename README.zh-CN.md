@@ -18,7 +18,7 @@ Burned 是一个给 Codex、Claude Code 和 GitHub Copilot 用的本地用量面
 
 - `Codex`
 - `Claude Code`
-- `GitHub Copilot`（读取 VS Code `chatSessions` 的 session 元数据；如果存在 `~/.copilot/session-state` agent 会话，还会接入原生 token 汇总）
+- `GitHub Copilot`（读取 VS Code `chatSessions` 的 session 元数据；如果存在 `~/.copilot/session-state` agent 会话，还会接入原生 token 汇总、premium request 总量，以及按超额 `$0.04 / request` 换算的等价金额）
 
 ## 快速开始
 

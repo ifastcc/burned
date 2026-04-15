@@ -74,6 +74,8 @@ impl SourceConnector for CodexConnector {
                 local_path: codex_home().map(display_path),
                 session_count: None,
                 last_seen_at: None,
+                premium_requests: None,
+                overage_equivalent_usd: None,
             },
             usage_events: Vec::new(),
             sessions: Vec::new(),
@@ -112,6 +114,8 @@ fn collect_codex() -> Result<SourceReport> {
         last_seen_at: latest_state_db
             .as_ref()
             .and_then(|path| format_mtime(path).ok()),
+        premium_requests: None,
+        overage_equivalent_usd: None,
     };
 
     let mut sessions = Vec::new();
@@ -167,6 +171,8 @@ fn missing_report() -> SourceReport {
             local_path: codex_home().map(display_path),
             session_count: None,
             last_seen_at: None,
+            premium_requests: None,
+            overage_equivalent_usd: None,
         },
         usage_events: Vec::new(),
         sessions: Vec::new(),

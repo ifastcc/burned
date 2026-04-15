@@ -18,7 +18,7 @@ It reads local session data, turns it into a consistent usage layer, and lets yo
 
 - `Codex`
 - `Claude Code`
-- `GitHub Copilot` (session metadata from VS Code `chatSessions`; native totals from `~/.copilot/session-state` when agent sessions exist)
+- `GitHub Copilot` (session metadata from VS Code `chatSessions`; native token totals, premium request totals, and overage-equivalent USD from `~/.copilot/session-state` when agent sessions exist)
 
 ## Quick Start
 

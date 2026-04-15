@@ -98,6 +98,8 @@ type CopyPack = {
     indexed: string;
     recomputed: string;
     pending: string;
+    completed: string;
+    active: string;
     unknown: string;
   };
 };
@@ -204,6 +206,8 @@ const copies: Record<Locale, CopyPack> = {
       indexed: "indexed",
       recomputed: "recomputed",
       pending: "pending",
+      completed: "completed",
+      active: "active",
       unknown: "unknown"
     }
   },
@@ -305,6 +309,8 @@ const copies: Record<Locale, CopyPack> = {
       indexed: "已索引",
       recomputed: "已重算",
       pending: "待定",
+      completed: "已完成",
+      active: "进行中",
       unknown: "未知"
     }
   }

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 import { createEmptyDashboardSnapshot } from "./data/empty-dashboard";
 import {
+  buildHomeHeroCopy,
   buildWeeklyBurnCopy,
   getDefaultSelectedDate,
   resolveSelectedDateAfterRefresh,
@@ -167,6 +168,10 @@ function pickPeakDay(data: DailyUsagePoint[]) {
 
 function formatTokenFigure(tokens: number, locale: Locale) {
   return formatFriendlyNumber(tokens, locale, 1);
+}
+
+function formatPremiumRequests(value: number, locale: Locale) {
+  return formatFriendlyNumber(value, locale, value >= 10 ? 1 : 2);
 }
 
 function costToneClass(coverage: PricingCoverage) {
@@ -835,6 +840,22 @@ function SourceDetailPage({
                 {pricingCoverageLabel(locale, snapshot.pricingCoverage)}
               </strong>
             </div>
+            {snapshot.status.premiumRequests != null && (
+              <div className="detail-chip">
+                <span className="detail-chip-label">{sc.premiumRequests}</span>
+                <strong className="detail-chip-value">
+                  {formatPremiumRequests(snapshot.status.premiumRequests, locale)}
+                </strong>
+              </div>
+            )}
+            {snapshot.status.overageEquivalentUsd != null && (
+              <div className="detail-chip">
+                <span className="detail-chip-label">{sc.overageEquivalent}</span>
+                <strong className="detail-chip-value">
+                  {formatUsd(snapshot.status.overageEquivalentUsd, locale)}
+                </strong>
+              </div>
+            )}
           </div>
         </div>
         {snapshot.longContext.sessionCount > 0 && (
@@ -1024,6 +1045,10 @@ export default function App() {
   const week = snapshot.week.length > 0 ? snapshot.week : snapshot.dailyHistory.slice(-7);
   const scanLabel =
     formatLocalizedDateTime(lastRefreshedAt ?? undefined, locale) ?? lastRefreshedAt;
+  const homeHeroCopy = buildHomeHeroCopy({
+    totalTokensToday: snapshot.totalTokensToday,
+    locale,
+  });
 
   return (
     <div className="burned-app">
@@ -1071,14 +1096,21 @@ export default function App() {
 
       {route.kind === "home" ? (
         <>
-          <section className="burn-hero">
-            <p className="hero-tagline">{sc.tagline}</p>
+          <section className={`burn-hero${homeHeroCopy.state === "idle" ? " burn-hero-idle" : ""}`}>
+            {homeHeroCopy.state === "active" && (
+              <p className="hero-tagline">{homeHeroCopy.title}</p>
+            )}
             <hr className="hero-sep" />
-            <span className="burn-number">
-              {snapshot.totalTokensToday > 0
-                ? formatCompactNumber(snapshot.totalTokensToday, locale, 1)
-                : "—"}
-            </span>
+            {homeHeroCopy.state === "idle" ? (
+              <>
+                <p className="burn-number burn-number-idle">{homeHeroCopy.title}</p>
+                <p className="hero-subtitle">{homeHeroCopy.subtitle}</p>
+              </>
+            ) : (
+              <span className="burn-number">
+                {formatCompactNumber(snapshot.totalTokensToday, locale, 1)}
+              </span>
+            )}
             {snapshot.totalTokensToday > 0 && (
               <p className={`burn-cost${costToneClass(snapshot.pricingCoverage)}`}>
                 {formatCostStatus(

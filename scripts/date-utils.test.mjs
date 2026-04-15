@@ -166,3 +166,41 @@ test("buildWeeklyBurnCopy includes the year in English titles once the selected 
     },
   );
 });
+
+test("buildHomeHeroCopy returns idle copy when today's total is zero", () => {
+  assert.equal(typeof dateUtils.buildHomeHeroCopy, "function");
+  if (typeof dateUtils.buildHomeHeroCopy !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    dateUtils.buildHomeHeroCopy({
+      totalTokensToday: 0,
+      locale: "zh-CN",
+    }),
+    {
+      state: "idle",
+      title: "今天还没烧起来",
+      subtitle: "还没有扫描到今天的 token 消耗",
+    },
+  );
+});
+
+test("buildHomeHeroCopy keeps the active hero copy once usage exists", () => {
+  assert.equal(typeof dateUtils.buildHomeHeroCopy, "function");
+  if (typeof dateUtils.buildHomeHeroCopy !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    dateUtils.buildHomeHeroCopy({
+      totalTokensToday: 128000,
+      locale: "en-US",
+    }),
+    {
+      state: "active",
+      title: "How many tokens have you burned today?",
+      subtitle: null,
+    },
+  );
+});

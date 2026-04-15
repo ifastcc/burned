@@ -19,6 +19,7 @@ use crate::pricing::TokenBreakdown;
 
 const SOURCE_ID: &str = "github_copilot";
 const SOURCE_NAME: &str = "GitHub Copilot";
+const PREMIUM_REQUEST_OVERAGE_USD: f64 = 0.04;
 
 pub struct GitHubCopilotConnector;
 
@@ -45,6 +46,7 @@ struct JsonlRecord {
 struct ParsedAgentSession {
     usage_events: Vec<UsageEvent>,
     session: Option<SessionRecord>,
+    premium_requests: Option<f64>,
 }
 
 impl SourceConnector for GitHubCopilotConnector {
@@ -72,6 +74,8 @@ impl SourceConnector for GitHubCopilotConnector {
                     .next(),
                 session_count: None,
                 last_seen_at: None,
+                premium_requests: None,
+                overage_equivalent_usd: None,
             },
             usage_events: Vec::new(),
             sessions: Vec::new(),
@@ -125,6 +129,8 @@ fn collect_github_copilot() -> Result<SourceReport> {
         Duration::from_secs(180 * 24 * 60 * 60),
     );
     let agent_parse_target_total = agent_parse_targets.len();
+    let mut premium_requests_total = 0.0;
+    let mut has_premium_request_data = false;
 
     for (index, path) in agent_parse_targets.into_iter().enumerate() {
         if agent_parse_target_total > 0
@@ -140,6 +146,10 @@ fn collect_github_copilot() -> Result<SourceReport> {
 
         let parsed = parse_agent_session_file(&path)?;
         usage_events.extend(parsed.usage_events);
+        if let Some(premium_requests) = parsed.premium_requests {
+            premium_requests_total += premium_requests;
+            has_premium_request_data = true;
+        }
         if let Some(session) = parsed.session {
             sessions.push(session);
         }
@@ -189,6 +199,7 @@ fn collect_github_copilot() -> Result<SourceReport> {
     } else {
         SourceState::Ready
     };
+    let premium_requests = has_premium_request_data.then_some(premium_requests_total);
 
     Ok(SourceReport {
         status: SourceStatus {
@@ -210,6 +221,9 @@ fn collect_github_copilot() -> Result<SourceReport> {
             local_path,
             session_count: Some((chat_session_files.len() + agent_state_files.len()) as u32),
             last_seen_at,
+            premium_requests,
+            overage_equivalent_usd: premium_requests
+                .map(|value| value * PREMIUM_REQUEST_OVERAGE_USD),
         },
         usage_events,
         sessions,
@@ -257,6 +271,8 @@ fn missing_report() -> SourceReport {
                 .next(),
             session_count: None,
             last_seen_at: None,
+            premium_requests: None,
+            overage_equivalent_usd: None,
         },
         usage_events: Vec::new(),
         sessions: Vec::new(),
@@ -426,6 +442,7 @@ fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
     let mut first_user_message = String::new();
     let mut usage_events = Vec::new();
     let mut session_status = "active".to_string();
+    let mut premium_requests = None;
 
     for line in contents.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -474,6 +491,20 @@ fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
                     .and_then(Value::as_str)
                     .and_then(parse_rfc3339_utc)
                     .or(updated_at);
+                premium_requests = data
+                    .get("totalPremiumRequests")
+                    .and_then(Value::as_f64)
+                    .or_else(|| {
+                        data.get("totalPremiumRequests")
+                            .and_then(Value::as_u64)
+                            .map(|value| value as f64)
+                    })
+                    .or_else(|| {
+                        data.get("totalPremiumRequests")
+                            .and_then(Value::as_i64)
+                            .map(|value| value as f64)
+                    })
+                    .or(premium_requests);
                 current_model = data
                     .get("currentModel")
                     .and_then(Value::as_str)
@@ -542,6 +573,7 @@ fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
     Ok(ParsedAgentSession {
         usage_events,
         session,
+        premium_requests,
     })
 }
 
@@ -1000,7 +1032,7 @@ mod tests {
             "copilot-agent",
             r#"{"type":"session.start","data":{"sessionId":"agent-session-1","startTime":"2026-04-13T01:52:55.020Z","selectedModel":"claude-sonnet-4.6","context":{"cwd":"/Users/kbaicai/Documents/codex_workspace/product"}}}
 {"type":"user.message","data":{"content":"帮我做一个 accounting visualization"}}
-{"type":"session.shutdown","data":{"currentModel":"claude-sonnet-4.6","modelMetrics":{"claude-sonnet-4.6":{"requests":{"count":5,"cost":1},"usage":{"inputTokens":129755,"outputTokens":16496,"cacheReadTokens":91485,"cacheWriteTokens":0}}}},"timestamp":"2026-04-13T01:56:37.254Z"}"#,
+{"type":"session.shutdown","data":{"currentModel":"claude-sonnet-4.6","totalPremiumRequests":1.5,"modelMetrics":{"claude-sonnet-4.6":{"requests":{"count":5,"cost":1},"usage":{"inputTokens":129755,"outputTokens":16496,"cacheReadTokens":91485,"cacheWriteTokens":0}}}},"timestamp":"2026-04-13T01:56:37.254Z"}"#,
         )?;
 
         let parsed = parse_agent_session_file(&path)?;
@@ -1013,6 +1045,7 @@ mod tests {
         .ok();
 
         assert_eq!(parsed.usage_events.len(), 1);
+        assert_eq!(parsed.premium_requests, Some(1.5));
         assert_eq!(parsed.usage_events[0].model, "claude-sonnet-4.6");
         assert_eq!(parsed.usage_events[0].token_breakdown.input_tokens, 129755);
         assert_eq!(

@@ -47,7 +47,7 @@ export type SessionSummary = {
   pricingCoverage: PricingCoverage;
   longContext?: LongContextSessionSummary | null;
   calculationMethod: CalculationMethod;
-  status: "indexed" | "recomputed" | "pending";
+  status: "indexed" | "recomputed" | "pending" | "completed" | "active";
 };
 
 export type SourceStatus = {
@@ -59,6 +59,8 @@ export type SourceStatus = {
   localPath?: string | null;
   sessionCount?: number | null;
   lastSeenAt?: string | null;
+  premiumRequests?: number | null;
+  overageEquivalentUsd?: number | null;
 };
 
 export type SessionGroup = {

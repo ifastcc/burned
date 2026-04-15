@@ -1,6 +1,8 @@
 export const showcaseCopy = {
   "en-US": {
     tagline: "How many tokens have you burned today?",
+    idleTitle: "Nothing burning yet today",
+    idleSubtitle: "Today's token usage will show up after the first scan",
     perHour: "/ hour",
     last7Days: "Last 7 Days",
     weekPeakStat: "7-Day Peak",
@@ -23,6 +25,8 @@ export const showcaseCopy = {
     backToOverview: "Back to overview",
     sourceState: "Status",
     pricingCoverage: "Pricing",
+    premiumRequests: "Premium requests",
+    overageEquivalent: "Overage equivalent",
     sourceUnavailable: "Source snapshot unavailable",
     noSourceSessions: "No indexed sessions for this source yet",
     refresh: "Refresh",
@@ -33,6 +37,8 @@ export const showcaseCopy = {
   },
   "zh-CN": {
     tagline: "你今天已经烧掉多少 token？",
+    idleTitle: "今天还没烧起来",
+    idleSubtitle: "还没有扫描到今天的 token 消耗",
     perHour: "/ 小时",
     last7Days: "近 7 天",
     weekPeakStat: "7 日峰值",
@@ -55,6 +61,8 @@ export const showcaseCopy = {
     backToOverview: "返回总览",
     sourceState: "状态",
     pricingCoverage: "计费",
+    premiumRequests: "Premium requests",
+    overageEquivalent: "超额等价金额",
     sourceUnavailable: "这个来源的详情暂时不可用",
     noSourceSessions: "这个来源下面还没有索引到 session",
     refresh: "刷新",

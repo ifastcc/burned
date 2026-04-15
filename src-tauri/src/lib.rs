@@ -1140,6 +1140,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn source_detail_snapshot_preserves_premium_request_status() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 4, 14, 16, 0, 0)
+            .single()
+            .expect("utc datetime");
+        let report = SourceReport {
+            status: SourceStatus {
+                premium_requests: Some(1.5),
+                overage_equivalent_usd: Some(0.06),
+                ..ready_status("github_copilot", "GitHub Copilot")
+            },
+            usage_events: Vec::new(),
+            sessions: Vec::new(),
+        };
+
+        let snapshot = build_source_snapshot_from_reports(
+            &[report],
+            now,
+            SnapshotTimeZone::Named("UTC".parse::<Tz>().expect("time zone")),
+            "github_copilot",
+        )
+        .expect("source snapshot");
+
+        assert_eq!(snapshot.status.premium_requests, Some(1.5));
+        assert_eq!(snapshot.status.overage_equivalent_usd, Some(0.06));
+    }
+
     fn ready_status(id: &str, name: &str) -> SourceStatus {
         SourceStatus {
             id: id.into(),
@@ -1150,6 +1178,8 @@ mod tests {
             local_path: None,
             session_count: Some(1),
             last_seen_at: None,
+            premium_requests: None,
+            overage_equivalent_usd: None,
         }
     }
 

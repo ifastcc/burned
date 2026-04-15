@@ -94,6 +94,8 @@ pub struct SourceStatus {
     pub local_path: Option<String>,
     pub session_count: Option<u32>,
     pub last_seen_at: Option<String>,
+    pub premium_requests: Option<f64>,
+    pub overage_equivalent_usd: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]

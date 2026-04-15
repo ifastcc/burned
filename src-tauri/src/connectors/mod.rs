@@ -121,6 +121,8 @@ mod tests {
                     local_path: None,
                     session_count: None,
                     last_seen_at: None,
+                    premium_requests: None,
+                    overage_equivalent_usd: None,
                 },
                 usage_events: Vec::new(),
                 sessions: Vec::new(),

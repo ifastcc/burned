@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -47,6 +47,11 @@ struct ParsedAgentSession {
     usage_events: Vec<UsageEvent>,
     session: Option<SessionRecord>,
     premium_requests: Option<f64>,
+}
+
+struct ParsedChatSession {
+    usage_events: Vec<UsageEvent>,
+    session: Option<SessionRecord>,
 }
 
 impl SourceConnector for GitHubCopilotConnector {
@@ -118,7 +123,9 @@ fn collect_github_copilot() -> Result<SourceReport> {
             );
         }
 
-        if let Some(session) = parse_session_file(&path)? {
+        let parsed = parse_chat_session_file(&path)?;
+        usage_events.extend(parsed.usage_events);
+        if let Some(session) = parsed.session {
             sessions.push(session);
         }
     }
@@ -181,7 +188,7 @@ fn collect_github_copilot() -> Result<SourceReport> {
         "GitHub Copilot is installed, but no local VS Code or agent session files were found yet."
             .into()
     } else if !usage_events.is_empty() {
-        "VS Code chatSessions expose session metadata, and Copilot agent session-state adds native session totals, model usage, and premium request counts."
+        "VS Code chatSessions and Copilot agent session-state expose native token usage when available; agent session-state also adds premium request counts."
             .into()
     } else if chat_session_files.is_empty() {
         "Copilot agent session-state was found, but no completed sessions with native usage totals were parsed yet."
@@ -190,7 +197,7 @@ fn collect_github_copilot() -> Result<SourceReport> {
         "GitHub Copilot chatSessions were found, but no usable user prompts were parsed yet."
             .into()
     } else {
-        "VS Code chatSessions expose session titles, workspace context, and model IDs. Native token totals are only available for Copilot agent sessions under ~/.copilot/session-state."
+        "VS Code chatSessions were indexed for titles, workspace context, and request models, but native token totals were not present in the sampled chat request metadata or Copilot agent session-state files yet."
             .into()
     };
 
@@ -349,9 +356,12 @@ fn recent_files(files: &[PathBuf], top_n: usize, max_age: Duration) -> Vec<PathB
     selected
 }
 
-fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
+fn parse_chat_session_file(path: &Path) -> Result<ParsedChatSession> {
     let Some(snapshot) = read_session_snapshot(path)? else {
-        return Ok(None);
+        return Ok(ParsedChatSession {
+            usage_events: Vec::new(),
+            session: None,
+        });
     };
 
     let requests = snapshot
@@ -359,15 +369,6 @@ fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let first_user_message = requests
-        .iter()
-        .find_map(extract_request_text)
-        .unwrap_or_default();
-
-    if requests.is_empty() || first_user_message.is_empty() {
-        return Ok(None);
-    }
-
     let session_id = snapshot
         .get("sessionId")
         .and_then(Value::as_str)
@@ -378,6 +379,18 @@ fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| "unknown".into());
+    let usage_events = usage_events_from_chat_requests(&session_id, &requests);
+    let first_user_message = requests
+        .iter()
+        .find_map(extract_request_text)
+        .unwrap_or_default();
+
+    if requests.is_empty() || first_user_message.is_empty() {
+        return Ok(ParsedChatSession {
+            usage_events,
+            session: None,
+        });
+    }
 
     let created_at = snapshot
         .get("creationDate")
@@ -400,29 +413,47 @@ fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
         .get("customTitle")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let total_tokens = usage_events.iter().map(|event| event.total_tokens).sum::<u64>();
+    let summary_model = usage_events
+        .last()
+        .map(|event| event.model.clone())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| choose_model(&snapshot, &requests));
 
-    Ok(Some(SessionRecord {
-        updated_at,
-        summary: SessionSummary {
-            id: session_id,
-            source_id: SOURCE_ID.into(),
-            title: choose_title(custom_title, &first_user_message),
-            preview: make_preview(&first_user_message),
-            source: SOURCE_NAME.into(),
-            workspace: workspace_name_for_session_file(path),
-            model: choose_model(&snapshot, &requests),
-            started_at: created_at
-                .with_timezone(&Local)
-                .format("%b %-d %H:%M")
-                .to_string(),
-            total_tokens: 0,
-            cost_usd: 0.0,
-            pricing_coverage: PricingCoverage::Pending,
-            long_context: None,
-            calculation_method: CalculationMethod::Derived,
-            status: "indexed".into(),
-        },
-    }))
+    Ok(ParsedChatSession {
+        usage_events,
+        session: Some(SessionRecord {
+            updated_at,
+            summary: SessionSummary {
+                id: session_id,
+                source_id: SOURCE_ID.into(),
+                title: choose_title(custom_title, &first_user_message),
+                preview: make_preview(&first_user_message),
+                source: SOURCE_NAME.into(),
+                workspace: workspace_name_for_session_file(path),
+                model: summary_model,
+                started_at: created_at
+                    .with_timezone(&Local)
+                    .format("%b %-d %H:%M")
+                    .to_string(),
+                total_tokens,
+                cost_usd: 0.0,
+                pricing_coverage: PricingCoverage::Pending,
+                long_context: None,
+                calculation_method: if total_tokens > 0 {
+                    CalculationMethod::Native
+                } else {
+                    CalculationMethod::Derived
+                },
+                status: "indexed".into(),
+            },
+        }),
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_session_file(path: &Path) -> Result<Option<SessionRecord>> {
+    Ok(parse_chat_session_file(path)?.session)
 }
 
 fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
@@ -434,8 +465,8 @@ fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
         .and_then(|name| name.to_str())
         .map(str::to_owned)
         .unwrap_or_else(|| "unknown".into());
-    let mut started_at = None;
-    let mut updated_at = None;
+    let mut started_at: Option<DateTime<Utc>> = None;
+    let mut updated_at: Option<DateTime<Utc>> = None;
     let mut workspace_cwd = String::new();
     let mut selected_model = String::new();
     let mut current_model = String::new();
@@ -443,6 +474,8 @@ fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
     let mut usage_events = Vec::new();
     let mut session_status = "active".to_string();
     let mut premium_requests = None;
+    let mut segment_compaction_by_model: HashMap<Option<String>, TokenBreakdown> = HashMap::new();
+    let mut trailing_output_by_model: HashMap<Option<String>, u64> = HashMap::new();
 
     for line in contents.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -452,6 +485,17 @@ fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
             continue;
         };
         let data = value.get("data").unwrap_or(&Value::Null);
+        let event_timestamp = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_utc);
+
+        if let Some(timestamp) = event_timestamp {
+            updated_at = Some(match updated_at {
+                Some(current) => current.max(timestamp),
+                None => timestamp,
+            });
+        }
 
         match event_type {
             "session.start" => {
@@ -462,12 +506,15 @@ fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
                     .get("startTime")
                     .and_then(Value::as_str)
                     .and_then(parse_rfc3339_utc)
+                    .or(event_timestamp)
                     .or(started_at);
-                selected_model = data
+                if let Some(model) = data
                     .get("selectedModel")
                     .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or(selected_model);
+                    .and_then(model_key)
+                {
+                    selected_model = model;
+                }
                 workspace_cwd = data
                     .get("context")
                     .and_then(|context| context.get("cwd"))
@@ -484,45 +531,141 @@ fn parse_agent_session_file(path: &Path) -> Result<ParsedAgentSession> {
                         .unwrap_or_default();
                 }
             }
+            "session.model_change" => {
+                if let Some(model) = data.get("newModel").and_then(Value::as_str).and_then(model_key)
+                {
+                    current_model = model;
+                }
+            }
+            "tool.execution_complete" => {
+                if let Some(model) = data.get("model").and_then(Value::as_str).and_then(model_key) {
+                    current_model = model;
+                }
+            }
+            "session.compaction_complete" => {
+                if let Some(compaction) = compaction_breakdown(data) {
+                    let entry = segment_compaction_by_model
+                        .entry(current_model_key(&current_model))
+                        .or_default();
+                    add_breakdown(entry, compaction);
+                }
+            }
+            "assistant.message" => {
+                let output_tokens = data
+                    .get("outputTokens")
+                    .and_then(u64_from_value)
+                    .unwrap_or(0);
+                if output_tokens > 0 {
+                    let entry = trailing_output_by_model
+                        .entry(current_model_key(&current_model))
+                        .or_default();
+                    *entry = entry.saturating_add(output_tokens);
+                }
+            }
             "session.shutdown" => {
                 session_status = "completed".into();
-                updated_at = value
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .and_then(parse_rfc3339_utc)
-                    .or(updated_at);
                 premium_requests = data
                     .get("totalPremiumRequests")
-                    .and_then(Value::as_f64)
-                    .or_else(|| {
-                        data.get("totalPremiumRequests")
-                            .and_then(Value::as_u64)
-                            .map(|value| value as f64)
-                    })
-                    .or_else(|| {
-                        data.get("totalPremiumRequests")
-                            .and_then(Value::as_i64)
-                            .map(|value| value as f64)
-                    })
+                    .and_then(f64_from_value)
                     .or(premium_requests);
-                current_model = data
-                    .get("currentModel")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or(current_model);
+                if let Some(model) = data.get("currentModel").and_then(Value::as_str).and_then(model_key)
+                {
+                    current_model = model;
+                }
 
+                let occurred_at = event_timestamp.unwrap_or_else(|| updated_at.unwrap_or_else(Utc::now));
+                let mut pending_compaction = std::mem::take(&mut segment_compaction_by_model);
                 if let Some(model_metrics) = data.get("modelMetrics").and_then(Value::as_object) {
-                    let occurred_at = updated_at.unwrap_or_else(Utc::now);
-                    for (model, metrics) in model_metrics {
+                    let unassigned_compaction = if model_metrics.len() == 1 {
+                        pending_compaction.remove(&None).unwrap_or_default()
+                    } else {
+                        TokenBreakdown::default()
+                    };
+
+                    for (index, (model, metrics)) in model_metrics.iter().enumerate() {
+                        let model_key = model_key(model);
+                        let mut event =
+                            usage_event_from_model_metrics(&session_id, model, occurred_at, metrics);
+
+                        let mut extra = pending_compaction.remove(&model_key).unwrap_or_default();
+                        if model_metrics.len() == 1 && index == 0 {
+                            add_breakdown(&mut extra, unassigned_compaction);
+                        }
+
+                        if let Some(event) = event.as_mut() {
+                            add_breakdown(&mut event.token_breakdown, extra);
+                            event.total_tokens = event.token_breakdown.total_tokens();
+                        } else if let Some(model) = model_key
+                            .as_deref()
+                            .or_else(|| current_or_selected_model(&current_model, &selected_model))
+                        {
+                            event = usage_event_from_breakdown(
+                                &session_id,
+                                occurred_at,
+                                model,
+                                extra,
+                            );
+                        }
+
+                        if let Some(event) = event {
+                            usage_events.push(event);
+                        }
+                    }
+
+                    let fallback_model = current_or_selected_model(&current_model, &selected_model)
+                        .map(str::to_owned)
+                        .or_else(|| usage_events.last().map(|event| event.model.clone()));
+                    for (model_key, breakdown) in pending_compaction.drain() {
+                        let model = model_key
+                            .as_deref()
+                            .or(fallback_model.as_deref())
+                            .unwrap_or("unknown");
                         if let Some(event) =
-                            usage_event_from_model_metrics(&session_id, model, occurred_at, metrics)
+                            usage_event_from_breakdown(&session_id, occurred_at, model, breakdown)
                         {
                             usage_events.push(event);
                         }
                     }
                 }
+                let fallback_model = current_or_selected_model(&current_model, &selected_model)
+                    .map(str::to_owned)
+                    .or_else(|| usage_events.last().map(|event| event.model.clone()));
+                for (model_key, breakdown) in pending_compaction {
+                    let model = model_key
+                        .as_deref()
+                        .or(fallback_model.as_deref())
+                        .unwrap_or("unknown");
+                    if let Some(event) =
+                        usage_event_from_breakdown(&session_id, occurred_at, model, breakdown)
+                    {
+                        usage_events.push(event);
+                    }
+                }
+
+                trailing_output_by_model.clear();
             }
             _ => {}
+        }
+    }
+
+    let active_occurred_at = updated_at.unwrap_or_else(|| started_at.unwrap_or_else(Utc::now));
+    let fallback_model = current_or_selected_model(&current_model, &selected_model)
+        .map(str::to_owned)
+        .or_else(|| usage_events.last().map(|event| event.model.clone()));
+    let mut active_breakdown_by_model = segment_compaction_by_model;
+    for (model_key, output_tokens) in trailing_output_by_model {
+        let entry = active_breakdown_by_model.entry(model_key).or_default();
+        entry.output_tokens = entry.output_tokens.saturating_add(output_tokens);
+    }
+    for (model_key, breakdown) in active_breakdown_by_model {
+        let model = model_key
+            .as_deref()
+            .or(fallback_model.as_deref())
+            .unwrap_or("unknown");
+        if let Some(event) =
+            usage_event_from_breakdown(&session_id, active_occurred_at, model, breakdown)
+        {
+            usage_events.push(event);
         }
     }
 
@@ -701,21 +844,66 @@ fn choose_model(snapshot: &Value, requests: &[Value]) -> String {
     requests
         .iter()
         .rev()
-        .find_map(|request| {
-            request
-                .get("resolvedModel")
-                .and_then(Value::as_str)
-                .or_else(|| request.get("modelId").and_then(Value::as_str))
-        })
+        .find_map(chat_request_model)
         .or_else(|| {
             snapshot
                 .get("selectedModel")
                 .and_then(|selected_model| selected_model.get("identifier"))
                 .and_then(Value::as_str)
+                .and_then(model_key)
         })
-        .map(sanitize_model)
-        .filter(|model| !model.is_empty())
         .unwrap_or_else(|| "unknown".into())
+}
+
+fn usage_events_from_chat_requests(session_id: &str, requests: &[Value]) -> Vec<UsageEvent> {
+    requests
+        .iter()
+        .filter_map(|request| {
+            let metadata = request
+                .get("result")
+                .and_then(|result| result.get("metadata"))
+                .filter(|metadata| metadata.is_object())?;
+            let raw_input_tokens = metadata
+                .get("promptTokens")
+                .or_else(|| metadata.get("inputTokens"))
+                .and_then(u64_from_value)
+                .unwrap_or(0);
+            let cached_input_tokens = metadata
+                .get("cacheReadTokens")
+                .or_else(|| metadata.get("cachedInputTokens"))
+                .and_then(u64_from_value)
+                .unwrap_or(0);
+            let cache_creation_input_tokens = metadata
+                .get("cacheWriteTokens")
+                .or_else(|| metadata.get("cacheCreationInputTokens"))
+                .and_then(u64_from_value)
+                .unwrap_or(0);
+            let output_tokens = metadata
+                .get("outputTokens")
+                .and_then(u64_from_value)
+                .unwrap_or(0);
+            let token_breakdown = TokenBreakdown {
+                input_tokens: raw_input_tokens.saturating_sub(cached_input_tokens),
+                cache_creation_input_tokens,
+                cached_input_tokens,
+                output_tokens,
+                other_tokens: 0,
+            };
+            let occurred_at = request
+                .get("timestamp")
+                .and_then(Value::as_i64)
+                .and_then(epoch_millis_to_utc)
+                .unwrap_or_else(Utc::now);
+            let model = metadata
+                .get("resolvedModel")
+                .and_then(Value::as_str)
+                .and_then(model_key)
+                .or_else(|| chat_request_model(request))
+                .unwrap_or_else(|| "unknown".into());
+
+            usage_event_from_breakdown(session_id, occurred_at, &model, token_breakdown)
+        })
+        .collect()
 }
 
 fn usage_event_from_model_metrics(
@@ -725,21 +913,38 @@ fn usage_event_from_model_metrics(
     metrics: &Value,
 ) -> Option<UsageEvent> {
     let usage = metrics.get("usage")?;
-    let input_tokens = usage.get("inputTokens").and_then(Value::as_u64).unwrap_or(0);
-    let output_tokens = usage.get("outputTokens").and_then(Value::as_u64).unwrap_or(0);
+    let raw_input_tokens = usage.get("inputTokens").and_then(u64_from_value).unwrap_or(0);
+    let output_tokens = usage.get("outputTokens").and_then(u64_from_value).unwrap_or(0);
     let cached_input_tokens = usage
         .get("cacheReadTokens")
-        .and_then(Value::as_u64)
+        .and_then(u64_from_value)
         .unwrap_or(0);
     let cache_creation_input_tokens = usage
         .get("cacheWriteTokens")
-        .and_then(Value::as_u64)
+        .and_then(u64_from_value)
         .unwrap_or(0);
-    let total_tokens = input_tokens
-        .saturating_add(cached_input_tokens)
-        .saturating_add(cache_creation_input_tokens)
-        .saturating_add(output_tokens);
 
+    usage_event_from_breakdown(
+        session_id,
+        occurred_at,
+        model,
+        TokenBreakdown {
+            input_tokens: raw_input_tokens.saturating_sub(cached_input_tokens),
+            cache_creation_input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            other_tokens: 0,
+        },
+    )
+}
+
+fn usage_event_from_breakdown(
+    session_id: &str,
+    occurred_at: DateTime<Utc>,
+    model: &str,
+    token_breakdown: TokenBreakdown,
+) -> Option<UsageEvent> {
+    let total_tokens = token_breakdown.total_tokens();
     if total_tokens == 0 {
         return None;
     }
@@ -747,18 +952,100 @@ fn usage_event_from_model_metrics(
     Some(UsageEvent {
         source_id: SOURCE_ID,
         occurred_at,
-        model: sanitize_model(model),
-        token_breakdown: TokenBreakdown {
-            input_tokens,
-            cache_creation_input_tokens,
-            cached_input_tokens,
-            output_tokens,
-            other_tokens: 0,
-        },
+        model: model_key(model).unwrap_or_else(|| "unknown".into()),
+        token_breakdown,
         total_tokens,
         calculation_method: CalculationMethod::Native,
         session_id: session_id.to_string(),
     })
+}
+
+fn chat_request_model(request: &Value) -> Option<String> {
+    request
+        .get("result")
+        .and_then(|result| result.get("metadata"))
+        .and_then(|metadata| metadata.get("resolvedModel"))
+        .and_then(Value::as_str)
+        .and_then(model_key)
+        .or_else(|| {
+            request
+                .get("resolvedModel")
+                .and_then(Value::as_str)
+                .and_then(model_key)
+        })
+        .or_else(|| {
+            request
+                .get("modelId")
+                .and_then(Value::as_str)
+                .and_then(model_key)
+        })
+}
+
+fn compaction_breakdown(data: &Value) -> Option<TokenBreakdown> {
+    let usage = data.get("compactionTokensUsed")?;
+    let raw_input_tokens = usage.get("input").and_then(u64_from_value).unwrap_or(0);
+    let cached_input_tokens = usage
+        .get("cachedInput")
+        .and_then(u64_from_value)
+        .unwrap_or(0);
+    let output_tokens = usage.get("output").and_then(u64_from_value).unwrap_or(0);
+    let token_breakdown = TokenBreakdown {
+        input_tokens: raw_input_tokens.saturating_sub(cached_input_tokens),
+        cache_creation_input_tokens: 0,
+        cached_input_tokens,
+        output_tokens,
+        other_tokens: 0,
+    };
+
+    (token_breakdown.total_tokens() > 0).then_some(token_breakdown)
+}
+
+fn add_breakdown(target: &mut TokenBreakdown, extra: TokenBreakdown) {
+    target.input_tokens = target.input_tokens.saturating_add(extra.input_tokens);
+    target.cache_creation_input_tokens = target
+        .cache_creation_input_tokens
+        .saturating_add(extra.cache_creation_input_tokens);
+    target.cached_input_tokens = target
+        .cached_input_tokens
+        .saturating_add(extra.cached_input_tokens);
+    target.output_tokens = target.output_tokens.saturating_add(extra.output_tokens);
+    target.other_tokens = target.other_tokens.saturating_add(extra.other_tokens);
+}
+
+fn current_model_key(current_model: &str) -> Option<String> {
+    (!current_model.is_empty()).then(|| current_model.to_string())
+}
+
+fn current_or_selected_model<'a>(
+    current_model: &'a str,
+    selected_model: &'a str,
+) -> Option<&'a str> {
+    if !current_model.is_empty() {
+        Some(current_model)
+    } else if !selected_model.is_empty() {
+        Some(selected_model)
+    } else {
+        None
+    }
+}
+
+fn model_key(model: &str) -> Option<String> {
+    let sanitized = sanitize_model(model);
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn u64_from_value(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().filter(|value| *value >= 0).map(|value| value as u64))
+        .or_else(|| value.as_f64().filter(|value| *value >= 0.0).map(|value| value as u64))
+}
+
+fn f64_from_value(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_u64().map(|value| value as f64))
+        .or_else(|| value.as_i64().map(|value| value as f64))
 }
 
 fn sanitize_model(model: &str) -> String {
@@ -1004,6 +1291,78 @@ mod tests {
     }
 
     #[test]
+    fn usage_events_from_chat_requests_extract_native_tokens() {
+        let requests = vec![serde_json::json!({
+            "timestamp": 1776435954489_i64,
+            "resolvedModel": "claude-opus-4-6",
+            "message": {
+                "text": "请帮我梳理 loop agency 的表达问题"
+            },
+            "result": {
+                "metadata": {
+                    "promptTokens": 81437,
+                    "outputTokens": 896,
+                    "resolvedModel": "claude-opus-4-6"
+                }
+            }
+        })];
+
+        let usage_events = usage_events_from_chat_requests("copilot-session-usage", &requests);
+
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].model, "claude-opus-4-6");
+        assert_eq!(usage_events[0].token_breakdown.input_tokens, 81437);
+        assert_eq!(usage_events[0].token_breakdown.output_tokens, 896);
+        assert_eq!(usage_events[0].total_tokens, 82333);
+        assert_eq!(usage_events[0].calculation_method, CalculationMethod::Native);
+    }
+
+    #[test]
+    fn parse_session_file_promotes_chat_request_metadata_to_native_usage() -> Result<()> {
+        let path = write_workspace_storage(
+            "copilot-json-native-usage",
+            r#"{"folder":"file:///Users/kbaicai/Documents/codex_workspace/product"}"#,
+            "session.json",
+            r#"{
+  "sessionId": "copilot-session-native",
+  "creationDate": 1776435757731,
+  "lastMessageDate": 1776435954489,
+  "requests": [
+    {
+      "timestamp": 1776435954489,
+      "resolvedModel": "claude-opus-4-6",
+      "message": {
+        "text": "帮我梳理一下这版 loop agency 的表达"
+      },
+      "result": {
+        "metadata": {
+          "promptTokens": 81437,
+          "outputTokens": 896,
+          "resolvedModel": "claude-opus-4-6"
+        }
+      }
+    }
+  ]
+}"#,
+        )?;
+
+        let parsed = parse_session_file(&path)?.expect("session");
+        fs::remove_dir_all(
+            path.parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .expect("temp root"),
+        )
+        .ok();
+
+        assert_eq!(parsed.summary.id, "copilot-session-native");
+        assert_eq!(parsed.summary.model, "claude-opus-4-6");
+        assert_eq!(parsed.summary.total_tokens, 82333);
+        assert_eq!(parsed.summary.calculation_method, CalculationMethod::Native);
+        Ok(())
+    }
+
+    #[test]
     fn parse_session_file_applies_jsonl_patches() -> Result<()> {
         let path = write_workspace_storage(
             "copilot-jsonl",
@@ -1047,21 +1406,57 @@ mod tests {
         assert_eq!(parsed.usage_events.len(), 1);
         assert_eq!(parsed.premium_requests, Some(1.5));
         assert_eq!(parsed.usage_events[0].model, "claude-sonnet-4.6");
-        assert_eq!(parsed.usage_events[0].token_breakdown.input_tokens, 129755);
+        assert_eq!(parsed.usage_events[0].token_breakdown.input_tokens, 38270);
         assert_eq!(
             parsed.usage_events[0].token_breakdown.cached_input_tokens,
             91485
         );
         assert_eq!(parsed.usage_events[0].token_breakdown.output_tokens, 16496);
-        assert_eq!(parsed.usage_events[0].total_tokens, 237736);
+        assert_eq!(parsed.usage_events[0].total_tokens, 146251);
 
         let session = parsed.session.expect("session");
         assert_eq!(session.summary.id, "agent-session-1");
         assert_eq!(session.summary.workspace, "product");
         assert_eq!(session.summary.model, "claude-sonnet-4.6");
-        assert_eq!(session.summary.total_tokens, 237736);
+        assert_eq!(session.summary.total_tokens, 146251);
         assert_eq!(session.summary.calculation_method, CalculationMethod::Native);
         assert_eq!(session.summary.status, "completed");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_agent_session_file_tracks_compaction_and_active_trailing_output() -> Result<()> {
+        let path = write_agent_session(
+            "copilot-agent-active",
+            r#"{"type":"session.start","data":{"sessionId":"agent-session-2","startTime":"2026-04-13T02:00:00.000Z","context":{"cwd":"/Users/kbaicai/Documents/codex_workspace/product"}}}
+{"type":"user.message","data":{"content":"继续帮我改 burned 的 copilot connector"}}
+{"type":"tool.execution_complete","data":{"model":"claude-opus-4.6"}}
+{"type":"session.compaction_complete","data":{"compactionTokensUsed":{"input":120000,"output":3000,"cachedInput":110000}}}
+{"type":"assistant.message","data":{"outputTokens":500}}
+{"type":"assistant.message","data":{"outputTokens":300}}"#,
+        )?;
+
+        let parsed = parse_agent_session_file(&path)?;
+        fs::remove_dir_all(
+            path.parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .expect("temp root"),
+        )
+        .ok();
+
+        assert_eq!(parsed.usage_events.len(), 1);
+        assert_eq!(parsed.usage_events[0].model, "claude-opus-4.6");
+        assert_eq!(parsed.usage_events[0].token_breakdown.input_tokens, 10000);
+        assert_eq!(parsed.usage_events[0].token_breakdown.cached_input_tokens, 110000);
+        assert_eq!(parsed.usage_events[0].token_breakdown.output_tokens, 3800);
+        assert_eq!(parsed.usage_events[0].total_tokens, 123800);
+
+        let session = parsed.session.expect("session");
+        assert_eq!(session.summary.model, "claude-opus-4.6");
+        assert_eq!(session.summary.total_tokens, 123800);
+        assert_eq!(session.summary.calculation_method, CalculationMethod::Native);
+        assert_eq!(session.summary.status, "active");
         Ok(())
     }
 }
